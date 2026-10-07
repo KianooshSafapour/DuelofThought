@@ -1,0 +1,64 @@
+BOULDER YARD R12-b SOLVABILITY STRESS TEST — free tractor (power=1, no abilities)
+Engine ground truth: src/lib/game/boulder-engine.ts step(s,dir,{power:1}) · push-optimal BFS · reach-set canonical
+
+== CAMPAIGN 1 — BOULDER YARD (quarry) — 24 levels ==
+lvl | par | opt |  expanded | status
+  1 |   2 |   2 |        10 | SOLVABLE · par==opt ✓  3ms
+  2 |   4 |   4 |       164 | SOLVABLE · par==opt ✓  12ms
+  3 |   3 |   3 |        17 | SOLVABLE · par==opt ✓  0ms
+  4 |   6 |   6 |      2939 | SOLVABLE · par==opt ✓  124ms
+  5 |   4 |   4 |       155 | SOLVABLE · par==opt ✓  2ms
+  6 |   4 |   4 |        21 | SOLVABLE · par==opt ✓  0ms
+  7 |   8 |   8 |       483 | SOLVABLE · par==opt ✓  13ms
+  8 |   4 |   4 |      2977 | SOLVABLE · par==opt ✓  107ms
+  9 |  10 |  10 |      6930 | SOLVABLE · par==opt ✓  303ms
+ 10 |   5 |   5 |      1700 | SOLVABLE · par==opt ✓  41ms
+ 11 |   5 |   5 |        20 | SOLVABLE · par==opt ✓  1ms
+ 12 |   6 |   6 |        35 | SOLVABLE · par==opt ✓  0ms
+ 13 |  12 |  12 |    113842 | SOLVABLE · par==opt ✓  8090ms
+ 14 |  10 |  10 |    103190 | SOLVABLE · par==opt ✓  7117ms
+ 15 |   9 |   9 |      5905 | SOLVABLE · par==opt ✓  234ms
+ 16 |  12 |  12 |      9080 | SOLVABLE · par==opt ✓  318ms
+ 17 |   8 |   8 |     71770 | SOLVABLE · par==opt ✓  3681ms
+ 18 |  15 |  15 |    257814 | SOLVABLE · par==opt ✓  32500ms
+ 19 |   7 |   7 |     26832 | SOLVABLE · par==opt ✓  927ms
+ 20 |   6 |   6 |      8826 | SOLVABLE · par==opt ✓  210ms
+ 21 |  11 |  11 |    137333 | SOLVABLE · par==opt ✓  9961ms
+ 22 |  10 |  10 |    105069 | SOLVABLE · par==opt ✓  5902ms
+ 23 |   8 |   8 |     55173 | SOLVABLE · par==opt ✓  2240ms
+ 24 |  10 |  10 |    120182 | SOLVABLE · par==opt ✓  7356ms
+--> CAMPAIGN 1 — BOULDER YARD (quarry): 24/24 solvable with free tractor · 0 par mismatch(es)
+
+== CAMPAIGN 2 — BOULDER YARD II (factory) — 24 levels ==
+lvl | par | opt |  expanded | status
+  1 |   5 |   5 |        28 | SOLVABLE · par==opt ✓  1ms
+  2 |   4 |   4 |        15 | SOLVABLE · par==opt ✓  1ms
+  3 |   6 |   6 |        94 | SOLVABLE · par==opt ✓  3ms
+  4 |   3 |   3 |        87 | SOLVABLE · par==opt ✓  1ms
+  5 |   4 |   4 |        86 | SOLVABLE · par==opt ✓  3ms
+  6 |   4 |   4 |       175 | SOLVABLE · par==opt ✓  5ms
+  7 |   5 |   5 |       100 | SOLVABLE · par==opt ✓  6ms
+  8 |  10 |  10 |      1200 | SOLVABLE · par==opt ✓  53ms
+  9 |   8 |   8 |       337 | SOLVABLE · par==opt ✓  10ms
+ 10 |   3 |   3 |        76 | SOLVABLE · par==opt ✓  1ms
+ 11 |   8 |   8 |       583 | SOLVABLE · par==opt ✓  20ms
+ 12 |   5 |   5 |       766 | SOLVABLE · par==opt ✓  14ms
+ 13 |   6 |   6 |       496 | SOLVABLE · par==opt ✓  13ms
+ 14 |   7 |   7 |      1440 | SOLVABLE · par==opt ✓  35ms
+ 15 |   8 |   8 |       376 | SOLVABLE · par==opt ✓  8ms
+ 16 |  10 |  10 |     58991 | SOLVABLE · par==opt ✓  2943ms
+ 17 |   8 |   8 |      2293 | SOLVABLE · par==opt ✓  72ms
+ 18 |   7 |   7 |       718 | SOLVABLE · par==opt ✓  17ms
+ 19 |   5 |   5 |       283 | SOLVABLE · par==opt ✓  2ms
+ 20 |   8 |   8 |       658 | SOLVABLE · par==opt ✓  19ms
+ 21 |  11 |  11 |     16798 | SOLVABLE · par==opt ✓  663ms
+ 22 |   6 |   6 |      2831 | SOLVABLE · par==opt ✓  71ms
+ 23 |   4 |   4 |       154 | SOLVABLE · par==opt ✓  3ms
+ 24 |   9 |   9 |      8146 | SOLVABLE · par==opt ✓  313ms
+--> CAMPAIGN 2 — BOULDER YARD II (factory): 24/24 solvable with free tractor · 0 par mismatch(es)
+
+== SEQUENTIAL PROGRESSION CHECK ==
+CAMPAIGN 1 — BOULDER YARD (quarry): 24 levels · next-always-exists ✓ · rectangular+player-start ✓
+CAMPAIGN 2 — BOULDER YARD II (factory): 24 levels · next-always-exists ✓ · rectangular+player-start ✓
+
+RESULT: ALL LEVELS SOLVABLE WITH THE FREE TRACTOR ✓

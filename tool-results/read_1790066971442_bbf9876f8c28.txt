@@ -1,0 +1,652 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * GameScreen — orchestrates a full match: local 2P, vs AI, or online (socket).
+     5→     5→ * Handles turns, AI thinking, resign, hint, timers, post-game rewards (submit
+     6→     6→ * to /api/game/submit for PVE/local) and the "insight card" (educational feedback).
+     7→     7→ */
+     8→     8→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+     9→     9→import { GameState, PlayerId, createGame, applyMove, cloneState, insightFor } from '@/lib/game/engine';
+    10→    10→import { chooseMove, Difficulty } from '@/lib/game/ai';
+    11→    11→import { getBoard } from '@/lib/game/boards';
+    12→    12→import { STORE_ITEMS } from '@/lib/game/content';
+    13→    13→import { GameBoard, BoardPalette } from './GameBoard';
+    14→    14→import { useApp } from '@/store/app';
+    15→    15→import { api, ApplyResultDTO } from '@/lib/api';
+    16→    16→import { sfx } from '@/lib/sound';
+    17→    17→import { Button } from '@/components/ui/button';
+    18→    18→import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    19→    19→import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+    20→    20→import { toast } from 'sonner';
+    21→    21→import { RotateCw, Flag, Lightbulb, Volume2, VolumeX, Swords, BrainCircuit, Undo2 } from 'lucide-react';
+    22→    22→import { localizeDigits } from '@/lib/i18n';
+    23→    23→import { cn } from '@/lib/utils';
+    24→    24→import { PixelSprite } from '@/components/shared/PixelSprite';
+    25→    25→import { WinFireworks, effectSkinVisual } from '@/components/game/WinFireworks';
+    26→    26→
+    27→    27→type Mode = 'ai' | 'local';
+    28→    28→
+    29→    29→/** emote id → emoji (allowlist mirrors the socket service) */
+    30→    30→const EMOTE_MAP: Record<string, string> = {
+    31→    31→  gg: '🤝', oops: '😅', hurry: '⏰', thanks: '🙏', laugh: '😄',
+    32→    32→};
+    33→    33→
+    34→    34→export interface OnlineGameHooks {
+    35→    35→  mySide: PlayerId;
+    36→    36→  sendMove: (col: number) => void;
+    37→    37→  sendResign: () => void;
+    38→    38→  opponentName: string;
+    39→    39→  opponentAvatar: string;
+    40→    40→  opponentPieceSkin?: string;
+    41→    41→  sendRematch: () => void;
+    42→    42→  chat: { from: string; text: string }[];
+    43→    43→  sendChat: (text: string) => void;
+    44→    44→  emotes: { from: string; id: string }[];
+    45→    45→  sendEmote: (id: string) => void;
+    46→    46→}
+    47→    47→
+    48→    48→export interface OnlineRewards {
+    49→    49→  coins: number; xp: number; eloDelta: number | null; level: number;
+    50→    50→  unlockedAchievements: { id: string; coins: number; rarity: string; icon: string }[];
+    51→    51→}
+    52→    52→
+    53→    53→export function GameScreen({
+    54→    54→  mode, aiLevel, boardId, online, onlineState, onlineRewards, onExit,
+    55→    55→}: {
+    56→    56→  mode: Mode | 'online';
+    57→    57→  aiLevel: Difficulty;
+    58→    58→  boardId: string;
+    59→    59→  online?: OnlineGameHooks;
+    60→    60→  onlineState?: GameState | null;
+    61→    61→  onlineRewards?: OnlineRewards | null;
+    62→    62→  onExit: () => void;
+    63→    63→}) {
+    64→    64→  const { t, locale, user, owned, patchUser } = useApp();
+    65→    65→  const board = useMemo(() => getBoard(boardId), [boardId]);
+    66→    66→  const [state, setState] = useState<GameState>(() => createGame(board.numbers, board.id));
+    67→    67→  const [thinking, setThinking] = useState(false);
+    68→    68→  const [rotated, setRotated] = useState(false);
+    69→    69→  const [hintCol, setHintCol] = useState<number | null>(null);
+    70→    70→  const [settling, setSettling] = useState(false); // post-game modal open
+    71→    71→  const [result, setResult] = useState<ApplyResultDTO | null>(null);
+    72→    72→  const [submitting, setSubmitting] = useState(false);
+    73→    73→  const [chatDraft, setChatDraft] = useState('');
+    74→    74→  const [celebrate, setCelebrate] = useState(false);
+    75→    75→  const [askResign, setAskResign] = useState(false);
+    76→    76→  const startedAt = useRef(Date.now());
+    77→    77→  const aiTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    78→    78→  const finishedRef = useRef(false); // guards double finishGame submission (modal close must NOT re-fire)
+    79→    79→
+    80→    80→  /* server-authoritative online state sync */
+    81→    81→  const onlineCounts = (s: GameState) => {
+    82→    82→    if (s.counts && s.counts[0]) return s;
+    83→    83→    s.counts = [new Uint8Array(10), new Uint8Array(10)];
+    84→    84→    for (const c of s.cells) if (c.o === 1 || c.o === 2) { if (c.n) s.counts[c.o - 1][c.n]++; }
+    85→    85→    return s;
+    86→    86→  };
+    87→    87→  useEffect(() => {
+    88→    88→    if (mode === 'online' && onlineState) {
+    89→    89→      setState(onlineCounts(onlineState));
+    90→    90→      if (onlineState.lastMove !== null) {
+    91→    91→        const n = onlineState.cells[onlineState.lastMove].n;
+    92→    92→        if (n !== null) sfx.capture(); else sfx.drop();
+    93→    93→      }
+    94→    94→      if (onlineState.result) {
+    95→    95→        if (onlineState.result.winner === 0) { sfx.lose(); }
+    96→    96→        else if (onlineState.result.winner === (online?.mySide ?? 1)) { sfx.win(); if (onlineRewards?.coins) sfx.coin(); setCelebrate(true); setTimeout(() => setCelebrate(false), 3400); }
+    97→    97→        else sfx.lose();
+    98→    98→        setSettling(true); // open post-game modal for online matches too
+    99→    99→      }
+   100→   100→    }
+   101→   101→  }, [onlineState, mode]);
+   102→   102→
+   103→   103→  const piece1 = user?.pieceSkin && owned.includes(user.pieceSkin) ? user.pieceSkin : 'piece_terracotta';
+   104→   104→  const piece2 = online?.opponentPieceSkin ?? 'piece_jade';
+   105→   105→  const palette = useMemo<BoardPalette>(() => {
+   106→   106→    const item = STORE_ITEMS.find((i) => i.code === (user?.boardSkin && owned.includes(user.boardSkin) ? user.boardSkin : 'board_classic'));
+   107→   107→    return (item?.data ?? {}) as unknown as BoardPalette;
+   108→   108→  }, [user?.boardSkin, owned]);
+   109→   109→
+   110→   110→  const localPlayerName = (p: PlayerId) => (mode === 'local' ? (p === 1 ? t('player1') : t('player2')) : p === 1 ? (user?.username ?? t('you')) : `AI ${aiLevel}`);
+   111→   111→
+   112→   112→  /* human-readable end reason, perspective-aware:
+   113→   113→   * won=null → neutral (local PvP), true → viewer won (opponent resigned/timed out), false → viewer lost */
+   114→   114→  const winReasonText = (type: string | null, won: boolean | null) => {
+   115→   115→    if (type === 'KIND') return t('win_kind');
+   116→   116→    if (type === 'RUN') return t('win_run');
+   117→   117→    if (type === 'FULL') return t('draw_full');
+   118→   118→    if (type === 'TIMEOUT') return won === null ? t('win_timeout') : won ? t('timeout_opp') : t('timeout_you');
+   119→   119→    return won === null ? t('win_resign') : won ? t('resign_opp') : t('resign_you');
+   120→   120→  };
+   121→   121→
+   122→   122→  const viewerWon: boolean | null = state.result
+   123→   123→    ? mode === 'ai'
+   124→   124→      ? state.result.winner === 1
+   125→   125→      : mode === 'online'
+   126→   126→        ? state.result.winner === (online?.mySide ?? 1)
+   127→   127→        : null
+   128→   128→    : null;
+   129→   129→
+   130→   130→  /* ------------------ finishing flow ------------------ */
+   131→   131→  const finishGame = useCallback(async (s: GameState) => {
+   132→   132→    // single-shot guard: doResign/handleColumn may call this directly AND the
+   133→   133→    // game-over watch-effect fires right after the same state commit — without
+   134→   134→    // this, two identical submissions race (one 200 + one spurious DUPLICATE toast)
+   135→   135→    if (finishedRef.current) return;
+   136→   136→    finishedRef.current = true;
+   137→   137→    setSettling(true);
+   138→   138→    if (mode === 'online' || !user) return;
+   139→   139→    // build submission for PVE / local
+   140→   140→    const winner: 'P1' | 'P2' | 'DRAW' = s.result ? (s.result.winner === 1 ? 'P1' : s.result.winner === 2 ? 'P2' : 'DRAW') : 'DRAW';
+   141→   141→    const endReason = s.result?.type === 'KIND' || s.result?.type === 'RUN' ? s.result.type : s.result?.type === 'FULL' ? 'FULL' : 'RESIGN';
+   142→   142→    const duration = Date.now() - startedAt.current;
+   143→   143→    setSubmitting(true);
+   144→   144→    try {
+   145→   145→      const res = await api.post<ApplyResultDTO>('/api/game/submit', {
+   146→   146→        mode: mode === 'ai' ? 'PVE' : 'LOCAL_PVP',
+   147→   147→        boardId: s.boardId,
+   148→   148→        aiLevel: mode === 'ai' ? aiLevel : undefined,
+   149→   149→        endReason,
+   150→   150→        winner,
+   151→   151→        winNumbers: s.result?.numbers ?? [],
+   152→   152→        history: s.history,
+   153→   153→        durationMs: Math.min(duration, 4 * 3600_000),
+   154→   154→        opponentName: mode === 'ai' ? `AI ${aiLevel}` : t('player2'),
+   155→   155→      });
+   156→   156→      setResult(res);
+   157→   157→      if (res.coins > 0) sfx.coin();
+   158→   158→      if (res.unlockedAchievements.length > 0) sfx.achievement();
+   159→   159→      if (res.levelUps > 0) sfx.levelup();
+   160→   160→      patchUser(res.user);
+   161→   161→    } catch (e) {
+   162→   162→      console.error('submit failed', e);
+   163→   163→      const code = (e as Error).message;
+   164→   164→      toast.error(code === 'DUPLICATE' ? t('e_duplicate') : code === 'RATE' ? t('e_rate') : t('error'));
+   165→   165→    } finally {
+   166→   166→      setSubmitting(false);
+   167→   167→    }
+   168→   168→  }, [mode, user, aiLevel, patchUser, t]);
+   169→   169→
+   170→   170→  /* resign */
+   171→   171→  const doResign = useCallback(() => {
+   172→   172→    if (state.result) return;
+   173→   173→    if (mode === 'online' && online) { online.sendResign(); sfx.lose(); return; }
+   174→   174→    const s = cloneState(state);
+   175→   175→    const loser: PlayerId = 1; // local resign = P1 concedes; AI mode human concedes
+   176→   176→    const winner: PlayerId = loser === 1 ? 2 : 1;
+   177→   177→    s.result = { winner, type: 'RESIGN', numbers: [], winCells: [] };
+   178→   178→    setState(s);
+   179→   179→    sfx.lose();
+   180→   180→    void finishGame(s);
+   181→   181→  }, [state, mode, online, finishGame]);
+   182→   182→
+   183→   183→  /* ------------------ AI turn ------------------ */
+   184→   184→  useEffect(() => {
+   185→   185→    if (mode !== 'ai') return;
+   186→   186→    if (state.result || state.turn !== 2) return;
+   187→   187→    setThinking(true);
+   188→   188→    const delay = 350 + Math.random() * 550;
+   189→   189→    aiTimer.current = setTimeout(() => {
+   190→   190→      const s = cloneState(state);
+   191→   191→      const col = chooseMove(s, aiLevel);
+   192→   192→      if (col >= 0) {
+   193→   193→        const cellN = s.cells[s.heights[col] * 9 + col]?.n;
+   194→   194→        applyMove(s, col);
+   195→   195→        setState(s);
+   196→   196→        if (cellN !== null) sfx.capture(); else sfx.drop();
+   197→   197→      }
+   198→   198→      setThinking(false);
+   199→   199→    }, delay);
+   200→   200→    return () => { if (aiTimer.current) clearTimeout(aiTimer.current); };
+   201→   201→  }, [state, mode, aiLevel]);
+   202→   202→
+   203→   203→  /* watch for game over (non-online) — submission itself is guarded inside finishGame */
+   204→   204→  useEffect(() => {
+   205→   205→    if (mode !== 'online' && state.result && !finishedRef.current) {
+   206→   206→      const won = mode === 'ai' ? state.result.winner === 1 : true;
+   207→   207→      if (won) { sfx.win(); setCelebrate(true); setTimeout(() => setCelebrate(false), 3400); } else sfx.lose();
+   208→   208→      void finishGame(state);
+   209→   209→    }
+   210→   210→  }, [state.result, mode, finishGame]);
+   211→   211→
+   212→   212→  /* ------------------ interactions ------------------ */
+   213→   213→  const myTurn = mode === 'local' ? !state.result : mode === 'ai' ? state.turn === 1 && !state.result : online ? state.turn === online.mySide && !state.result : false;
+   214→   214→
+   215→   215→  const handleColumn = useCallback((col: number) => {
+   216→   216→    if (!myTurn) { sfx.bad(); return; }
+   217→   217→    if (mode === 'online' && online) { online.sendMove(col); return; }
+   218→   218→    const s = cloneState(state);
+   219→   219→    const cellN = s.cells[s.heights[col] * 9 + col]?.n;
+   220→   220→    if (applyMove(s, col) < 0) { sfx.bad(); return; }
+   221→   221→    setState(s);
+   222→   222→    setHintCol(null);
+   223→   223→    if (cellN !== null) sfx.capture(); else sfx.drop();
+   224→   224→    if (mode === 'local' && s.result) void finishGame(s);
+   225→   225→  }, [myTurn, mode, state, online, finishGame]);
+   226→   226→
+   227→   227→  const showHint = () => {
+   228→   228→    if (!myTurn) return;
+   229→   229→    const s = cloneState(state);
+   230→   230→    const col = chooseMove(s, 'MEDIUM');
+   231→   231→    if (col >= 0) { setHintCol(col); sfx.click(); toast.info(t('hint_used')); }
+   232→   232→  };
+   233→   233→
+   234→   234→  /* take-back: rewind 1 ply (local) or 2 plies (vs AI, so it stays your turn) */
+   235→   235→  const canUndo = (mode === 'ai' || mode === 'local') && !state.result && !thinking && state.history.length > 0;
+   236→   236→  const undoMove = () => {
+   237→   237→    if (!canUndo) return;
+   238→   238→    const steps = mode === 'ai' ? Math.min(2, state.history.length) : 1;
+   239→   239→    const s = createGame(board.numbers, board.id);
+   240→   240→    for (const col of state.history.slice(0, state.history.length - steps)) applyMove(s, col);
+   241→   241→    setState(s);
+   242→   242→    setHintCol(null);
+   243→   243→    sfx.click();
+   244→   244→  };
+   245→   245→
+   246→   246→  /* keyboard controls: 1-9 drop into columns (a11y + speed play) */
+   247→   247→  useEffect(() => {
+   248→   248→    const onKey = (e: KeyboardEvent) => {
+   249→   249→      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+   250→   250→      const n = parseInt(e.key, 10);
+   251→   251→      if (!Number.isNaN(n) && n >= 1 && n <= 9) {
+   252→   252→        if (myTurn) handleColumn(n - 1);
+   253→   253→      }
+   254→   254→    };
+   255→   255→    window.addEventListener('keydown', onKey);
+   256→   256→    return () => window.removeEventListener('keydown', onKey);
+   257→   257→  }, [myTurn, handleColumn]);
+   258→   258→
+   259→   259→  const restart = () => {
+   260→   260→    setCelebrate(false);
+   261→   261→    if (mode === 'online' && online) { online.sendRematch(); toast.info(t('rematch_wait')); return; }
+   262→   262→    setState(createGame(board.numbers, board.id));
+   263→   263→    setResult(null);
+   264→   264→    setSettling(false);
+   265→   265→    setHintCol(null);
+   266→   266→    startedAt.current = Date.now();
+   267→   267→    finishedRef.current = false;
+   268→   268→  };
+   269→   269→
+   270→   270→  const insightP = mode === 'ai' ? (insightFor(state, 1)) : insightFor(state, 1);
+   271→   271→  const turnLabel = mode === 'online'
+   272→   272→    ? (state.turn === online?.mySide ? t('your_turn') : t('opp_turn'))
+   273→   273→    : mode === 'ai' ? (state.turn === 1 ? t('your_turn') : t('thinking'))
+   274→   274→      : (state.turn === 1 ? t('p1_turn') : t('p2_turn'));
+   275→   275→
+   276→   276→  const piecesP1 = state.piecesLeft[0];
+   277→   277→  const piecesP2 = state.piecesLeft[1];
+   278→   278→
+   279→   279→  return (
+   280→   280→    <div className="mx-auto w-full max-w-3xl px-3 pb-6 pt-2">
+   281→   281→      {/* win celebration overlay (equipped effect skin) */}
+   282→   282→      <WinFireworks active={celebrate} {...effectSkinVisual(user?.effectSkin ?? 'fx_confetti')} />
+   283→   283→      {/* floating emote bubbles (online) */}
+   284→   284→      {mode === 'online' && online && online.emotes.length > 0 && (
+   285→   285→        <div className="pointer-events-none fixed inset-x-0 top-16 z-50 flex flex-col items-center gap-1">
+   286→   286→          {online.emotes.slice(-4).map((em, i) => (
+   287→   287→            <div key={`${em.from}-${i}`} className="animate-pop rounded-full border border-amber-400/40 bg-background/90 px-3 py-1 text-lg shadow-lg" dir="ltr">
+   288→   288→              {EMOTE_MAP[em.id] ?? '👋'} <span className="text-xs font-bold text-amber-400">{em.from}</span>
+   289→   289→            </div>
+   290→   290→          ))}
+   291→   291→        </div>
+   292→   292→      )}
+   293→   293→      {/* scoreboard */}
+   294→   294→      <div className="mb-3 flex items-stretch justify-between gap-2">
+   295→   295→        <PlayerChip
+   296→   296→          name={mode === 'online' ? (online?.mySide === 1 ? (user?.username ?? t('you')) : (online?.opponentName ?? '')) : localPlayerName(1)}
+   297→   297→          pieces={piecesP1}
+   298→   298→          active={state.turn === (mode === 'online' ? (online?.mySide ?? 1) : 1) && !state.result}
+   299→   299→          pieceCode={mode === 'online' && online?.mySide === 2 ? piece2 : piece1}
+   300→   300→          side={1}
+   301→   301→          score1={state.counts?.[0] ?? new Uint8Array(10)}
+   302→   302→        />
+   303→   303→        <div className="flex flex-col items-center justify-center text-center">
+   304→   304→          <div className="text-[10px] text-muted-foreground">{t('move_time')} <MoveTimer key={state.ply} paused={!!state.result} /> </div>
+   305→   305→          <div className={`text-sm font-bold ${thinking ? 'animate-pulse text-amber-400' : 'gold-text'}`}>{turnLabel}</div>
+   306→   306→          <div className="text-[10px] text-muted-foreground">{localizeDigits(state.ply, locale)}/۶۳</div>
+   307→   307→        </div>
+   308→   308→        <PlayerChip
+   309→   309→          align="end"
+   310→   310→          name={mode === 'online' ? (online?.mySide === 2 ? (user?.username ?? t('you')) : (online?.opponentName ?? '')) : localPlayerName(2)}
+   311→   311→          pieces={piecesP2}
+   312→   312→          active={state.turn === (mode === 'online' ? (online?.mySide === 2 ? 2 : 2) : 2) && !state.result}
+   313→   313→          pieceCode={mode === 'online' && online?.mySide === 2 ? piece1 : piece2}
+   314→   314→          side={2}
+   315→   315→          score1={state.counts?.[1] ?? new Uint8Array(10)}
+   316→   316→        />
+   317→   317→      </div>
+   318→   318→
+   319→   319→      {/* GameBoard gets ghost preview of the dropping piece */}
+   320→   320→      <GameBoard
+   321→   321→        state={state}
+   322→   322→        palette={palette}
+   323→   323→        piece1={mode === 'online' && online?.mySide === 2 ? piece2 : piece1}
+   324→   324→        piece2={mode === 'online' && online?.mySide === 2 ? piece1 : piece2}
+   325→   325→        onColumnClick={handleColumn}
+   326→   326→        interactive={myTurn}
+   327→   327→        rotated={rotated}
+   328→   328→        hintCol={hintCol}
+   329→   329→      />
+   330→   330→
+   331→   331→      {/* move log strip — tactical history of column drops */}
+   332→   332→      <MoveLogStrip history={state.history} />
+   333→   333→
+   334→   334→      {/* controls */}
+   335→   335→      <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+   336→   336→        <Button variant="outline" size="sm" onClick={() => { setRotated((r) => !r); sfx.click(); }}>
+   337→   337→          <RotateCw className="h-4 w-4" /> {t('rotate_view')}
+   338→   338→        </Button>
+   339→   339→        <Button variant="outline" size="sm" onClick={showHint} disabled={!myTurn || mode === 'online'}>
+   340→   340→          <Lightbulb className="h-4 w-4" /> {t('hint')}
+   341→   341→        </Button>
+   342→   342→        <Button variant="outline" size="sm" onClick={undoMove} disabled={!canUndo} title={t('undo')}>
+   343→   343→          <Undo2 className="h-4 w-4" /> {t('undo')}
+   344→   344→        </Button>
+   345→   345→        <Button variant="outline" size="sm" onClick={() => { const v = !(user?.soundOn ?? true); patchUser({ soundOn: v }); }}>
+   346→   346→          {(user?.soundOn ?? true) ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+   347→   347→        </Button>
+   348→   348→        <Button variant="destructive" size="sm" onClick={() => setAskResign(true)} disabled={!!state.result}>
+   349→   349→          <Flag className="h-4 w-4" /> {t('resign')}
+   350→   350→        </Button>
+   351→   351→        <Button variant="ghost" size="sm" onClick={onExit}>{t('back_hub')}</Button>
+   352→   352→        <span className="hidden items-center gap-1 rounded-full border border-border px-2 py-1 text-[10px] text-muted-foreground sm:inline-flex" title="keyboard">⌨️ 1–9</span>
+   353→   353→      </div>
+   354→   354→
+   355→   355→      {/* emote bar (online) */}
+   356→   356→      {mode === 'online' && online && (
+   357→   357→        <div className="mt-3 flex items-center justify-center gap-1.5">
+   358→   358→          {Object.entries(EMOTE_MAP).map(([id, emoji]) => (
+   359→   359→            <button
+   360→   360→              key={id}
+   361→   361→              onClick={() => { online.sendEmote(id); sfx.click(); }}
+   362→   362→              className="royal-card rounded-full px-3 py-1.5 text-lg transition-transform hover:scale-110 active:scale-95"
+   363→   363→              aria-label={`emote ${id}`}
+   364→   364→              title={id}
+   365→   365→            >
+   366→   366→              {emoji}
+   367→   367→            </button>
+   368→   368→          ))}
+   369→   369→        </div>
+   370→   370→      )}
+   371→   371→
+   372→   372→      {/* online chat */}
+   373→   373→      {mode === 'online' && online && (
+   374→   374→        <div className="royal-card mt-4 rounded-xl p-3">
+   375→   375→          <div className="mb-2 flex items-center gap-2 text-sm font-bold">
+   376→   376→            <Swords className="h-4 w-4 text-amber-400" /> {t('chat')}
+   377→   377→          </div>
+   378→   378→          <div className="nice-scroll mb-2 flex max-h-32 flex-col gap-1 overflow-y-auto" dir="auto">
+   379→   379→            {online.chat.map((c, i) => {
+   380→   380→              const own = c.from === (user?.username ?? 'me');
+   381→   381→              return (
+   382→   382→                <div
+   383→   383→                  key={i}
+   384→   384→                  className={cn('chat-bubble animate-pop', own ? 'chat-bubble-own' : 'chat-bubble-other')}
+   385→   385→                >
+   386→   386→                  {!own && <b className="me-1 text-amber-400">{c.from}:</b>}
+   387→   387→                  {c.text}
+   388→   388→                </div>
+   389→   389→              );
+   390→   390→            })}
+   391→   391→            {online.chat.length === 0 && <div className="text-xs text-muted-foreground">…</div>}
+   392→   392→          </div>
+   393→   393→          <form
+   394→   394→            className="flex gap-2"
+   395→   395→            onSubmit={(e) => {
+   396→   396→              e.preventDefault();
+   397→   397→              if (chatDraft.trim()) { online.sendChat(chatDraft.trim().slice(0, 200)); setChatDraft(''); }
+   398→   398→            }}
+   399→   399→          >
+   400→   400→            <input
+   401→   401→              className="flex-1 rounded-lg border bg-input px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring"
+   402→   402→              value={chatDraft}
+   403→   403→              onChange={(e) => setChatDraft(e.target.value)}
+   404→   404→              placeholder={t('chat_placeholder')}
+   405→   405→              maxLength={200}
+   406→   406→              dir="auto"
+   407→   407→            />
+   408→   408→            <Button type="submit" size="sm" variant="secondary">{t('confirm')}</Button>
+   409→   409→          </form>
+   410→   410→        </div>
+   411→   411→      )}
+   412→   412→
+   413→   413→      {/* resign confirm (styled replacement for native confirm) */}
+   414→   414→      <AlertDialog open={askResign} onOpenChange={setAskResign}>
+   415→   415→        <AlertDialogContent dir={locale === 'fa' || locale === 'ar' ? 'rtl' : 'ltr'} className="royal-card">
+   416→   416→          <AlertDialogHeader>
+   417→   417→            <AlertDialogTitle>{t('resign_confirm')}</AlertDialogTitle>
+   418→   418→          </AlertDialogHeader>
+   419→   419→          <AlertDialogFooter>
+   420→   420→            <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+   421→   421→            <AlertDialogAction
+   422→   422→              className="bg-rose-600 text-white hover:bg-rose-700"
+   423→   423→              onClick={() => { setAskResign(false); doResign(); }}
+   424→   424→            >
+   425→   425→              {t('resign')}
+   426→   426→            </AlertDialogAction>
+   427→   427→          </AlertDialogFooter>
+   428→   428→        </AlertDialogContent>
+   429→   429→      </AlertDialog>
+   430→   430→
+   431→   431→      {/* post-game modal */}
+   432→   432→      <Dialog open={!!state.result && settling} onOpenChange={(o) => !o && setSettling(false)}>
+   433→   433→        <DialogContent className="royal-card card-shine nice-scroll max-h-[85dvh] overflow-y-auto sm:max-w-md" aria-describedby={undefined} dir={locale === 'fa' || locale === 'ar' ? 'rtl' : 'ltr'}>
+   434→   434→          <DialogHeader>
+   435→   435→            <DialogTitle className="text-center text-2xl">
+   436→   436→              {state.result ? (
+   437→   437→                <div className="flex flex-col items-center gap-1.5">
+   438→   438→                  <span className="animate-pop text-5xl drop-shadow-[0_0_18px_rgba(245,158,11,.45)]" aria-hidden>
+   439→   439→                    {state.result.winner === 0
+   440→   440→                      ? '🤝'
+   441→   441→                      : mode === 'online'
+   442→   442→                        ? (state.result.winner === (online?.mySide ?? 1) ? '🏆' : '🛡️')
+   443→   443→                        : mode === 'ai'
+   444→   444→                          ? (state.result.winner === 1 ? '🏆' : '🛡️')
+   445→   445→                          : '🏆'}
+   446→   446→                  </span>
+   447→   447→                  {state.result.winner === 0 ? (
+   448→   448→                    <span className="gold-text">{t('draw')}</span>
+   449→   449→                  ) : mode === 'online' ? (
+   450→   450→                    state.result.winner === (online?.mySide ?? 1) ? <span className="gold-text">{t('victory')}</span> : <span className="text-rose-400">{t('defeat')}</span>
+   451→   451→                  ) : mode === 'ai' ? (
+   452→   452→                    state.result.winner === 1 ? <span className="gold-text">{t('victory')}</span> : <span className="text-rose-400">{t('defeat')}</span>
+   453→   453→                  ) : (
+   454→   454→                    <span className="gold-text">{winReasonText(state.result.type, viewerWon)}</span>
+   455→   455→                  )}
+   456→   456→                </div>
+   457→   457→              ) : null}
+   458→   458→            </DialogTitle>
+   459→   459→          </DialogHeader>
+   460→   460→
+   461→   461→          {state.result && state.result.winner !== 0 && (
+   462→   462→            <div className="mb-2 text-center text-sm">
+   463→   463→              {(state.result.type === 'KIND' || state.result.type === 'RUN') && state.result.numbers.length > 0 ? (
+   464→   464→                <div className="flex flex-wrap items-center justify-center gap-1.5">
+   465→   465→                  {mode !== 'local' && <span className="font-bold text-amber-400">{winReasonText(state.result.type, viewerWon)}</span>}
+   466→   466→                  {state.result.numbers.map((n, i) => (
+   467→   467→                    <span
+   468→   468→                      key={`${n}-${i}`}
+   469→   469→                      className="animate-pop rounded-lg border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-sm font-black text-amber-300 shadow-[0_0_10px_rgba(245,158,11,.15)]"
+   470→   470→                      style={{ animationDelay: `${i * 90}ms` }}
+   471→   471→                    >
+   472→   472→                      {localizeDigits(n, locale)}
+   473→   473→                    </span>
+   474→   474→                  ))}
+   475→   475→                </div>
+   476→   476→              ) : mode !== 'local' ? (
+   477→   477→                <span className="font-bold text-amber-400">{winReasonText(state.result.type, viewerWon)}</span>
+   478→   478→              ) : null}
+   479→   479→            </div>
+   480→   480→          )}
+   481→   481→
+   482→   482→          {/* rewards */}
+   483→   483→          {(submitting || result || (mode === 'online' && onlineRewards)) && (
+   484→   484→            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+   485→   485→              <div className="mb-1 flex items-center justify-center gap-2 text-sm font-bold"><BrainCircuit className="h-4 w-4" /> {t('rewards_title')}</div>
+   486→   486→              {submitting && <div className="py-3 text-center text-xs text-muted-foreground animate-pulse">{t('loading')}</div>}
+   487→   487→              {result && (
+   488→   488→                <div className="space-y-2">
+   489→   489→                  <div className="flex justify-center gap-4 text-lg font-black">
+   490→   490→                    <span className="animate-coin-fly" key={`c-${result.coins}`}>🪙 +{localizeDigits(result.coins, locale)}</span>
+   491→   491→                    <span className="text-emerald-400">✦ +{localizeDigits(result.xp, locale)} {t('xp')}</span>
+   492→   492→                  </div>
+   493→   493→                  {result.eloDelta !== null && (
+   494→   494→                    <div className="text-center text-xs text-muted-foreground">
+   495→   495→                      {t('rating')}: {result.eloDelta >= 0 ? '+' : ''}{localizeDigits(result.eloDelta, locale)}
+   496→   496→                    </div>
+   497→   497→                  )}
+   498→   498→                  {result.unlockedAchievements.map((a) => (
+   499→   499→                    <div key={a.id} className="animate-pop rounded-lg bg-gradient-to-r from-amber-500/20 to-fuchsia-500/20 px-3 py-1.5 text-center text-sm font-bold">
+   500→   500→                      🏅 {t('ach_unlocked')} +{localizeDigits(a.coins, locale)} 🪙
+   501→   501→                    </div>
+   502→   502→                  ))}
+   503→   503→                  {result.levelUps > 0 && (
+   504→   504→                    <div className="animate-pop rounded-lg bg-gradient-to-r from-emerald-500/25 to-amber-500/25 px-3 py-1.5 text-center text-sm font-black">
+   505→   505→                      ⬆ {t('level_up')} {localizeDigits(result.user.level, locale)}
+   506→   506→                    </div>
+   507→   507→                  )}
+   508→   508→                </div>
+   509→   509→              )}
+   510→   510→              {!submitting && !result && mode === 'online' && onlineRewards && (
+   511→   511→                <div className="space-y-2">
+   512→   512→                  <div className="flex justify-center gap-4 text-lg font-black">
+   513→   513→                    <span className="animate-coin-fly" key={`oc-${onlineRewards.coins}`}>🪙 +{localizeDigits(onlineRewards.coins, locale)}</span>
+   514→   514→                    <span className="text-emerald-400">✦ +{localizeDigits(onlineRewards.xp, locale)} {t('xp')}</span>
+   515→   515→                  </div>
+   516→   516→                  {onlineRewards.eloDelta !== null && (
+   517→   517→                    <div className="text-center text-xs text-muted-foreground">
+   518→   518→                      {t('rating')}: {onlineRewards.eloDelta >= 0 ? '+' : ''}{localizeDigits(onlineRewards.eloDelta, locale)}
+   519→   519→                    </div>
+   520→   520→                  )}
+   521→   521→                  {onlineRewards.unlockedAchievements.map((a) => (
+   522→   522→                    <div key={a.id} className="animate-pop rounded-lg bg-gradient-to-r from-amber-500/20 to-fuchsia-500/20 px-3 py-1.5 text-center text-sm font-bold">
+   523→   523→                      🏅 {t('ach_unlocked')} +{localizeDigits(a.coins, locale)} 🪙
+   524→   524→                    </div>
+   525→   525→                  ))}
+   526→   526→                </div>
+   527→   527→              )}
+   528→   528→            </div>
+   529→   529→          )}
+   530→   530→
+   531→   531→          {/* insight card (educational feedback loop) */}
+   532→   532→          <div className="rounded-xl border p-3 text-sm">
+   533→   533→            <div className="mb-2 font-bold">📊 {t('insight_title')}</div>
+   534→   534→            <div className="grid grid-cols-3 gap-2 text-center">
+   535→   535→              <div className="rounded-lg bg-muted p-2">
+   536→   536→                <div className="text-lg font-black text-amber-400">{localizeDigits(insightP.captured, locale)}</div>
+   537→   537→                <div className="text-[10px] text-muted-foreground">{t('insight_captured')}</div>
+   538→   538→              </div>
+   539→   539→              <div className="rounded-lg bg-muted p-2">
+   540→   540→                <div className="text-lg font-black text-fuchsia-400">
+   541→   541→                  {insightP.bestKind > 0 ? `${localizeDigits(insightP.bestKind, locale)}×${localizeDigits(insightP.bestKindNum, locale)}` : '—'}
+   542→   542→                </div>
+   543→   543→                <div className="text-[10px] text-muted-foreground">{t('insight_bestkind')}</div>
+   544→   544→              </div>
+   545→   545→              <div className="rounded-lg bg-muted p-2">
+   546→   546→                <div className="text-lg font-black text-emerald-400">
+   547→   547→                  {insightP.bestRunWin.length ? insightP.bestRunWin.map((n) => localizeDigits(n, locale)).join('') : '—'}
+   548→   548→                </div>
+   549→   549→                <div className="text-[10px] text-muted-foreground">{t('insight_bestrun')}</div>
+   550→   550→              </div>
+   551→   551→            </div>
+   552→   552→            {insightP.bestRunWin.length > 0 && insightP.bestRunWin.length < 4 && (
+   553→   553→              <div className="mt-2 text-center text-xs text-muted-foreground">
+   554→   554→                {t('insight_next')}: {insightP.bestRunWin.map((n) => localizeDigits(n, locale)).join('، ')}
+   555→   555→              </div>
+   556→   556→            )}
+   557→   557→          </div>
+   558→   558→
+   559→   559→          <div className="flex justify-center gap-2 pt-1">
+   560→   560→            <Button onClick={restart} className="glow-gold">{t('play_again')}</Button>
+   561→   561→            <Button variant="outline" onClick={onExit}>{t('back_hub')}</Button>
+   562→   562→          </div>
+   563→   563→        </DialogContent>
+   564→   564→      </Dialog>
+   565→   565→    </div>
+   566→   566→  );
+   567→   567→}
+   568→   568→
+   569→   569→function PlayerChip({
+   570→   570→  name, pieces, active, pieceCode, side, align = 'start', score1,
+   571→   571→}: {
+   572→   572→  name: string; pieces: number; active: boolean; pieceCode: string; side: 1 | 2;
+   573→   573→  align?: 'start' | 'end'; score1: Uint8Array;
+   574→   574→}) {
+   575→   575→  const t = useApp((s) => s.t);
+   576→   576→  const best = Array.from(score1).reduce((a, b) => Math.max(a, b), 0);
+   577→   577→  return (
+   578→   578→    <div className={`royal-card flex min-w-0 flex-1 items-center gap-2 rounded-xl p-2 transition-all duration-300 ${active ? 'glow-gold scale-[1.025]' : 'opacity-75'} ${align === 'end' ? 'flex-row-reverse text-end' : ''}`}>
+   579→   579→      <div className="shrink-0"><PixelSprite kind="piece" code={pieceCode} side={side} scale={3} /></div>
+   580→   580→      <div className="min-w-0">
+   581→   581→        <div className="flex items-center gap-1.5 truncate text-xs font-bold">
+   582→   582→          {active && (
+   583→   583→            <span className="relative inline-flex h-1.5 w-1.5 shrink-0" aria-hidden>
+   584→   584→              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+   585→   585→              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-400" />
+   586→   586→            </span>
+   587→   587→          )}
+   588→   588→          <span className="truncate">{name}</span>
+   589→   589→        </div>
+   590→   590→        <div className="text-[10px] text-muted-foreground">{pieces} {t('pieces_left')}</div>
+   591→   591→        {best >= 2 && <div className="text-[10px] font-bold text-amber-400">max {best}×</div>}
+   592→   592→      </div>
+   593→   593→    </div>
+   594→   594→  );
+   595→   595→}
+   596→   596→
+   597→   597→/** Per-move stopwatch; remounted (via key=ply) whenever a new piece lands. */
+   598→   598→function MoveTimer({ paused }: { paused?: boolean }) {
+   599→   599→  const locale = useApp((s) => s.locale);
+   600→   600→  const [sec, setSec] = useState(0);
+   601→   601→  useEffect(() => {
+   602→   602→    if (paused) return; // freeze the clock once the duel ends
+   603→   603→    const iv = setInterval(() => setSec((s) => Math.min(s + 1, 5999)), 1000);
+   604→   604→    return () => clearInterval(iv);
+   605→   605→  }, [paused]);
+   606→   606→  const m = Math.floor(sec / 60);
+   607→   607→  const s = sec % 60;
+   608→   608→  return (
+   609→   609→    <span className="font-mono text-[10px] tabular-nums" dir="ltr">
+   610→   610→      {localizeDigits(m, locale)}:{localizeDigits(String(s).padStart(2, '0'), locale)}
+   611→   611→    </span>
+   612→   612→  );
+   613→   613→}
+   614→   614→
+   615→   615→/** Compact tactical move log: one chip per ply (side dot + column), auto-scrolls to the latest. */
+   616→   616→function MoveLogStrip({ history }: { history: number[] }) {
+   617→   617→  const t = useApp((s) => s.t);
+   618→   618→  const locale = useApp((s) => s.locale);
+   619→   619→  const scroller = useRef<HTMLDivElement>(null);
+   620→   620→  const lastPly = history.length;
+   621→   621→  useEffect(() => {
+   622→   622→    // keep the newest chip visible (container is always dir=ltr, so scroll right)
+   623→   623→    scroller.current?.scrollTo({ left: 99999, behavior: 'smooth' });
+   624→   624→  }, [lastPly]);
+   625→   625→  if (!lastPly) return null;
+   626→   626→  return (
+   627→   627→    <div className="royal-card mt-2 flex items-center gap-2 rounded-xl px-2 py-1.5" aria-label={t('move_log')}>
+   628→   628→      <span className="shrink-0 text-[10px] font-bold text-muted-foreground">📜 {t('move_log')}</span>
+   629→   629→      <div ref={scroller} className="nice-scroll flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-0.5" dir="ltr">
+   630→   630→        {history.map((col, i) => {
+   631→   631→          const side = i % 2 === 0 ? 1 : 2;
+   632→   632→          const isLast = i === lastPly - 1;
+   633→   633→          return (
+   634→   634→            <span
+   635→   635→              key={i}
+   636→   636→              className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-bold tabular-nums transition-colors ${
+   637→   637→                side === 1
+   638→   638→                  ? 'border-amber-400/40 bg-amber-400/10 text-amber-300'
+   639→   639→                  : 'border-emerald-400/40 bg-emerald-400/10 text-emerald-300'
+   640→   640→              } ${isLast ? 'animate-pop ring-1 ring-amber-300/50' : 'opacity-80'}`}
+   641→   641→              title={`#${localizeDigits(i + 1, locale)}`}
+   642→   642→            >
+   643→   643→              <span className={`h-1.5 w-1.5 rounded-full ${side === 1 ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+   644→   644→              {localizeDigits(col + 1, locale)}
+   645→   645→            </span>
+   646→   646→          );
+   647→   647→        })}
+   648→   648→      </div>
+   649→   649→    </div>
+   650→   650→  );
+   651→   651→}
+   652→   652→

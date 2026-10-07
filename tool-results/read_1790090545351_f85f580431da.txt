@@ -1,0 +1,578 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * AppShell — single-page app root: top bar, bottom nav (mobile), view router,
+     5→ * auth dialog, language switcher, procedural background, sticky footer, PWA.
+     6→ */
+     7→import { useCallback, useEffect, useRef, useState } from 'react';
+     8→import { useApp, View } from '@/store/app';
+     9→import { api, SessionDTO } from '@/lib/api';
+    10→import { LOCALES, LOCALE_META, levelFromXpT } from '@/components/shared/shell-helpers';
+    11→import { localizeDigits } from '@/lib/i18n';
+    12→import { BackgroundCanvas, equippedBackground } from '@/components/shared/BackgroundCanvas';
+    13→import { AvatarBubble } from '@/components/shared/PixelSprite';
+    14→import { HubView } from '@/components/hub/HubView';
+    15→import { PlayView } from '@/components/game/PlayView';
+    16→import { Button } from '@/components/ui/button';
+    17→import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    18→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+    19→import { Input } from '@/components/ui/input';
+    20→import { toast } from 'sonner';
+    21→import { sfx, setSoundEnabled, initMusicPref, resumeMusicIfEnabled, isMusicEnabled, setMusicEnabled, setMusicMood, getMusicMood, MusicMood } from '@/lib/sound';
+    22→import { Home, Gamepad2, Store, Trophy, User, Shield, Coins, Volume2, VolumeX, Globe, LogOut, X, Music2, Music4, Moon, Sun, Drum, Rocket } from 'lucide-react';
+    23→
+    24→export function AppShell() {
+    25→  const { view, setView, user, authChecked, setSession, refreshSession, logout, locale, setLocale, t, patchUser } = useApp();
+    26→  const [authOpen, setAuthOpen] = useState(false);
+    27→  const [rulesOpen, setRulesOpen] = useState(false);
+    28→  const [aboutOpen, setAboutOpen] = useState(false);
+    29→  const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+    30→  const [username, setUsername] = useState('');
+    31→  const [password, setPassword] = useState('');
+    32→  const [busy, setBusy] = useState(false);
+    33→  /* SMS password recovery (2-step dialog, owned by T9-a) */
+    34→  const [forgotOpen, setForgotOpen] = useState(false);
+    35→  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+    36→  const [fPhone, setFPhone] = useState('');
+    37→  const [fCode, setFCode] = useState('');
+    38→  const [fPass, setFPass] = useState('');
+    39→  const [fBusy, setFBusy] = useState(false);
+    40→  const [fDevCode, setFDevCode] = useState<string | null>(null);
+    41→  const [resendAt, setResendAt] = useState(0); // epoch ms when resend unlocks (60s cooldown)
+    42→  const [smsNow, setSmsNow] = useState(0);
+    43→  const [musicOn, setMusicOn] = useState(false);
+    44→  const [mood, setMood] = useState<MusicMood>('night');
+    45→
+    46→  /* bootstrap session */
+    47→  useEffect(() => {
+    48→    void refreshSession();
+    49→    setMusicOn(initMusicPref());
+    50→    setMood(getMusicMood());
+    51→    // browsers block audio until a gesture — resume ambient music on first interaction
+    52→    const kick = () => { resumeMusicIfEnabled(); window.removeEventListener('pointerdown', kick); window.removeEventListener('keydown', kick); };
+    53→    window.addEventListener('pointerdown', kick, { once: true });
+    54→    window.addEventListener('keydown', kick, { once: true });
+    55→    return () => { window.removeEventListener('pointerdown', kick); window.removeEventListener('keydown', kick); };
+    56→  }, [refreshSession]);
+    57→
+    58→  const toggleMusic = useCallback(() => {
+    59→    const next = !isMusicEnabled();
+    60→    setMusicEnabled(next);
+    61→    setMusicOn(next);
+    62→  }, []);
+    63→
+    64→  const pickMood = useCallback((m: MusicMood) => {
+    65→    setMood(m);
+    66→    setMusicMood(m);
+    67→    if (!isMusicEnabled()) setMusicEnabled(true); // choosing a mood turns the music on
+    68→    setMusicOn(true);
+    69→    sfx.click();
+    70→  }, []);
+    71→
+    72→  const MOOD_ICON: Record<MusicMood, React.ReactNode> = {
+    73→    night: <Moon className="h-3.5 w-3.5" />,
+    74→    desert: <Sun className="h-3.5 w-3.5" />,
+    75→    battle: <Drum className="h-3.5 w-3.5" />,
+    76→  };
+    77→  const MOOD_LABEL: Record<MusicMood, string> = { night: t('mood_night'), desert: t('mood_desert'), battle: t('mood_battle') };
+    78→
+    79→  /* apply locale direction */
+    80→  useEffect(() => {
+    81→    document.documentElement.lang = locale;
+    82→    document.documentElement.dir = LOCALE_META[locale].dir;
+    83→  }, [locale]);
+    84→
+    85→  /* 1-second ticker while the forgot dialog is open (resend cooldown countdown) */
+    86→  useEffect(() => {
+    87→    if (!forgotOpen) return;
+    88→    setSmsNow(Date.now());
+    89→    const id = setInterval(() => setSmsNow(Date.now()), 1000);
+    90→    return () => clearInterval(id);
+    91→  }, [forgotOpen]);
+    92→
+    93→  /* weekly prize rollover nudge (one-shot per login session): an unclaimed
+    94→   * prize from last week's race deserves attention the moment you arrive */
+    95→  const userId = user?.id ?? null;
+    96→  useEffect(() => {
+    97→    if (!userId) return;
+    98→    let live = true;
+    99→    api
+   100→      .get<{ lastWeek?: { myClaim?: { reward: number } | null; claimed: boolean } }>('/api/leaderboard/weekly')
+   101→      .then((d) => {
+   102→        if (!live || !d?.lastWeek?.myClaim || d.lastWeek.claimed) return;
+   103→        toast(t('week_prize_nudge'), {
+   104→          description: `🏆 ${t('week_claim')} +${localizeDigits(d.lastWeek.myClaim.reward, locale)} 🪙`,
+   105→          action: { label: t('nav_board'), onClick: () => useApp.getState().setView('leaderboard') },
+   106→          duration: 10_000,
+   107→        });
+   108→      })
+   109→      .catch(() => undefined);
+   110→    return () => { live = false; };
+   111→  }, [userId, locale, t]);
+   112→
+   113→  /* PWA service worker (production only — dev caching breaks HMR) */
+   114→  useEffect(() => {
+   115→    if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator) {
+   116→      navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+   117→    }
+   118→  }, []);
+   119→
+   120→  const bg = equippedBackground(user?.background ?? 'bg_royal_velvet');
+   121→  const lvl = user ? levelFromXpT(user.xp) : null;
+   122→  const coinsShown = useCountUp(user?.coins ?? 0);
+   123→
+   124→  const doAuth = async (mode: 'login' | 'register' | 'guest') => {
+   125→    setBusy(true);
+   126→    try {
+   127→      let data: SessionDTO;
+   128→      if (mode === 'guest') {
+   129→        data = await api.post<SessionDTO>('/api/auth/guest');
+   130→      } else {
+   131→        data = await api.post<SessionDTO>(`/api/auth/${mode}`, { username: username.trim(), password, locale });
+   132→      }
+   133→      setSession(data);
+   134→      setAuthOpen(false);
+   135→      setUsername(''); setPassword('');
+   136→      sfx.achievement();
+   137→      toast.success(`${t('success')} — ${data.user.username}`);
+   138→    } catch (e) {
+   139→      const code = (e as Error).message;
+   140→      if (code === 'TAKEN') toast.error(t('e_username_taken'));
+   141→      else if (code === 'BAD_CREDENTIALS') toast.error(t('e_login_failed'));
+   142→      else if (code === 'BANNED') toast.error(t('e_banned'));
+   143→      else if (code === 'INVALID_USERNAME') toast.error(t('auth_rules_user'));
+   144→      else toast.error(t('error'));
+   145→    } finally {
+   146→      setBusy(false);
+   147→    }
+   148→  };
+   149→
+   150→  /* ---------- SMS password recovery ---------- */
+   151→  const mapSmsError = (code: string) => {
+   152→    if (code === 'PHONE_BAD') toast.error(t('e_sms_phone_bad'));
+   153→    else if (code === 'CODE_INVALID' || code === 'CODE_EXPIRED') toast.error(t('e_sms_code'));
+   154→    else if (code === 'RATE') toast.error(t('e_sms_rate'));
+   155→    else if (code === 'PHONE_TAKEN') toast.error(t('e_sms_phone_taken'));
+   156→    else toast.error(t('error'));
+   157→  };
+   158→
+   159→  const openForgot = () => {
+   160→    setForgotStep(1);
+   161→    setFPhone('');
+   162→    setFCode('');
+   163→    setFPass('');
+   164→    setFDevCode(null);
+   165→    setResendAt(0);
+   166→    setForgotOpen(true);
+   167→    sfx.click();
+   168→  };
+   169→
+   170→  const requestSmsCode = async () => {
+   171→    setFBusy(true);
+   172→    try {
+   173→      const res = await api.post<{ ok: boolean; devCode?: string }>('/api/auth/forgot', { phone: fPhone.trim() });
+   174→      setFDevCode(res.devCode ?? null);
+   175→      setForgotStep(2);
+   176→      setResendAt(Date.now() + 60_000);
+   177→      toast.success(t('sms_code_sent'));
+   178→    } catch (e) {
+   179→      mapSmsError((e as Error).message);
+   180→    } finally {
+   181→      setFBusy(false);
+   182→    }
+   183→  };
+   184→
+   185→  const doSmsReset = async () => {
+   186→    setFBusy(true);
+   187→    try {
+   188→      await api.post('/api/auth/reset', { phone: fPhone.trim(), code: fCode.trim(), newPassword: fPass });
+   189→      sfx.achievement();
+   190→      toast.success(t('sms_reset_ok'));
+   191→      setForgotOpen(false);
+   192→    } catch (e) {
+   193→      mapSmsError((e as Error).message);
+   194→    } finally {
+   195→      setFBusy(false);
+   196→    }
+   197→  };
+   198→
+   199→  const resendIn = Math.max(0, Math.ceil((resendAt - smsNow) / 1000));
+   200→
+   201→  const nav: { v: View; icon: React.ReactNode; label: string; adminOnly?: boolean }[] = [
+   202→    { v: 'hub', icon: <Home className="h-5 w-5" />, label: t('nav_hub') },
+   203→    { v: 'arcade', icon: <Rocket className="h-5 w-5" />, label: t('arcade_title') },
+   204→    { v: 'play', icon: <Gamepad2 className="h-5 w-5" />, label: t('nav_play') },
+   205→    { v: 'store', icon: <Store className="h-5 w-5" />, label: t('nav_store') },
+   206→    { v: 'leaderboard', icon: <Trophy className="h-5 w-5" />, label: t('nav_board') },
+   207→    { v: 'profile', icon: <User className="h-5 w-5" />, label: t('nav_profile') },
+   208→    ...(user?.role === 'ADMIN' ? [{ v: 'admin' as View, icon: <Shield className="h-5 w-5" />, label: t('nav_admin'), adminOnly: true }] : []),
+   209→  ];
+   210→
+   211→  const toggleSound = () => {
+   212→    const v = !(user?.soundOn ?? true);
+   213→    patchUser({ soundOn: v });
+   214→    setSoundEnabled(v);
+   215→    api.patch('/api/profile', { soundOn: v }).catch(() => undefined);
+   216→  };
+   217→
+   218→  return (
+   219→    <div className="flex min-h-dvh flex-col">
+   220→      <BackgroundCanvas kind={bg.kind} colors={bg.colors} accent={bg.accent} />
+   221→
+   222→      {/* ---------- top bar ---------- */}
+   223→      <header className="sticky top-0 z-40 border-b border-amber-500/15 bg-background/80 backdrop-blur-md">
+   224→        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-3">
+   225→          <button className="flex items-center gap-2" onClick={() => { setView('hub'); sfx.click(); }} aria-label="home">
+   226→            <img src="/brand/logo.png" className="h-9 w-9 rounded-xl object-cover shadow-lg ring-1 ring-amber-500/40" alt="" />
+   227→            <span className="hidden flex-col leading-tight sm:flex">
+   228→              <span className="text-sm font-black gold-text">{t('appName')}</span>
+   229→              <span className="text-[9px] text-muted-foreground">{t('parkName')}</span>
+   230→            </span>
+   231→          </button>
+   232→
+   233→          <div className="flex items-center gap-1.5">
+   234→            {/* coins & level */}
+   235→            {user && (
+   236→              <>
+   237→                <div className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-black text-amber-400" title={t('coins')}>
+   238→                  <Coins className="h-3.5 w-3.5" /> {localizeDigits(coinsShown, locale)}
+   239→                </div>
+   240→                <div className="hidden items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-black text-emerald-400 sm:flex">
+   241→                  ⭐ {t('level')} {localizeDigits(user.level, locale)}
+   242→                </div>
+   243→              </>
+   244→            )}
+   245→            {/* sound */}
+   246→            <button className="rounded-lg p-2 hover:bg-muted" onClick={toggleSound} aria-label="sound">
+   247→              {(user?.soundOn ?? true) ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+   248→            </button>
+   249→            {/* ambient music: quick toggle + mood picker */}
+   250→            <div className="flex items-center">
+   251→              <button className={`relative rounded-lg p-2 hover:bg-muted ${musicOn ? 'text-amber-400' : 'text-muted-foreground'}`} onClick={toggleMusic} aria-label="music" title={t('music')}>
+   252→                {musicOn ? <Music4 className="h-4 w-4 animate-pulse" /> : <Music2 className="h-4 w-4" />}
+   253→                {musicOn && <span className="absolute end-1 top-1 h-1 w-1 animate-ping rounded-full bg-amber-400" />}
+   254→              </button>
+   255→              <DropdownMenu>
+   256→                <DropdownMenuTrigger asChild>
+   257→                  <button className={`rounded-lg px-1 py-2 text-[9px] font-bold hover:bg-muted ${musicOn ? 'text-amber-400' : 'text-muted-foreground'}`} aria-label="music mood" title={t('music_mood')}>
+   258→                    {MOOD_ICON[mood]}
+   259→                  </button>
+   260→                </DropdownMenuTrigger>
+   261→                <DropdownMenuContent align="end" className="w-44">
+   262→                  <DropdownMenuLabel className="text-xs text-muted-foreground">{t('music_mood')}</DropdownMenuLabel>
+   263→                  <DropdownMenuSeparator />
+   264→                  {(['night', 'desert', 'battle'] as MusicMood[]).map((m) => (
+   265→                    <DropdownMenuItem key={m} onClick={() => pickMood(m)} className={mood === m && musicOn ? 'bg-amber-400/15 text-amber-400' : ''}>
+   266→                      {MOOD_ICON[m]} {MOOD_LABEL[m]}
+   267→                      {mood === m && musicOn && <span className="ms-auto text-[10px]">✓</span>}
+   268→                    </DropdownMenuItem>
+   269→                  ))}
+   270→                  <DropdownMenuSeparator />
+   271→                  <DropdownMenuItem onClick={toggleMusic} className="text-muted-foreground">
+   272→                    <Music2 className="h-3.5 w-3.5" /> {musicOn ? t('music_off') : t('music')}
+   273→                  </DropdownMenuItem>
+   274→                </DropdownMenuContent>
+   275→              </DropdownMenu>
+   276→            </div>
+   277→            {/* language */}
+   278→            <div className="relative">
+   279→              <select
+   280→                className="appearance-none rounded-lg bg-muted py-2 pe-2 ps-2 text-xs font-bold outline-none"
+   281→                value={locale}
+   282→                onChange={(e) => { setLocale(e.target.value as typeof locale); sfx.click(); }}
+   283→                aria-label="language"
+   284→              >
+   285→                {LOCALES.map((l) => (
+   286→                  <option key={l} value={l}>{LOCALE_META[l].flag} {LOCALE_META[l].label}</option>
+   287→                ))}
+   288→              </select>
+   289→            </div>
+   290→            {/* account */}
+   291→            {authChecked && (user ? (
+   292→              <button
+   293→                className="flex items-center gap-1.5 rounded-full border border-amber-500/30 p-0.5 pe-2 hover:bg-muted"
+   294→                onClick={() => { setView('profile'); sfx.click(); }}
+   295→                aria-label="profile"
+   296→              >
+   297→                <AvatarBubble code={user.avatarItem} size={26} />
+   298→                <span className="max-w-20 truncate text-xs font-bold">{user.username}</span>
+   299→              </button>
+   300→            ) : (
+   301→              <Button size="sm" className="glow-gold" onClick={() => { setAuthOpen(true); sfx.click(); }}>
+   302→                {t('login')}
+   303→              </Button>
+   304→            ))}
+   305→          </div>
+   306→        </div>
+   307→      </header>
+   308→
+   309→      {/* ---------- desktop nav ---------- */}
+   310→      <nav className="sticky top-14 z-30 hidden border-b border-amber-500/10 bg-background/60 backdrop-blur md:block" aria-label="main">
+   311→        <div className="mx-auto flex max-w-6xl items-center gap-1 px-3 py-1.5">
+   312→          {nav.map((n) => (
+   313→            <button
+   314→              key={n.v}
+   315→              onClick={() => { setView(n.v); sfx.click(); }}
+   316→              className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-bold transition-colors ${
+   317→                view === n.v ? 'bg-amber-400/15 text-amber-400' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+   318→              }`}
+   319→            >
+   320→              {n.icon} {n.label}
+   321→            </button>
+   322→          ))}
+   323→          {user && (
+   324→            <button className="ms-auto flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:text-rose-400" onClick={() => void logout()}>
+   325→              <LogOut className="h-3.5 w-3.5" /> {t('logout')}
+   326→            </button>
+   327→          )}
+   328→        </div>
+   329→      </nav>
+   330→
+   331→      {/* ---------- main ---------- */}
+   332→      <main className="flex-1 pb-20 md:pb-4" dir={LOCALE_META[locale].dir}>
+   333→        {!authChecked ? (
+   334→          <div className="grid place-items-center py-32"><div className="h-10 w-10 animate-spin rounded-full border-4 border-amber-400/30 border-t-amber-400" /></div>
+   335→        ) : (
+   336→          <>
+   337→            {view === 'hub' && <HubView />}
+   338→            {view === 'arcade' && <ArcadeLazy />}
+   339→            {view === 'play' && <PlayView />}
+   340→            {view === 'store' && <StoreLazy />}
+   341→            {view === 'leaderboard' && <LeaderboardLazy />}
+   342→            {view === 'profile' && <ProfileLazy />}
+   343→            {view === 'admin' && (user?.role === 'ADMIN' ? <AdminLazy /> : <div className="py-32 text-center text-muted-foreground">🔒 {t('admin_only')}</div>)}
+   344→          </>
+   345→        )}
+   346→      </main>
+   347→
+   348→      {/* ---------- sticky footer ---------- */}
+   349→      <footer className="mt-auto border-t border-amber-500/15 bg-background/80 pb-safe backdrop-blur-md">
+   350→        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-3 text-[11px] text-muted-foreground">
+   351→          <span>© {localizeDigits(new Date().getFullYear(), locale)} {t('company')} — {t('made_with')}</span>
+   352→          <div className="flex items-center gap-3">
+   353→            <button className="underline-offset-2 transition-colors hover:text-amber-400 hover:underline" onClick={() => { setRulesOpen(true); sfx.click(); }}>{t('footer_rules')}</button>
+   354→            <button className="underline-offset-2 transition-colors hover:text-amber-400 hover:underline" onClick={() => { setAboutOpen(true); sfx.click(); }}>{t('footer_about')}</button>
+   355→            <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> fa · en · ar · tr</span>
+   356→            <span className="hidden sm:inline">{t('version')} v0.2.0-alpha</span>
+   357→          </div>
+   358→        </div>
+   359→      </footer>
+   360→
+   361→      {/* ---------- mobile bottom nav ---------- */}
+   362→      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-amber-500/20 bg-background/90 pb-safe backdrop-blur-md md:hidden" aria-label="mobile">
+   363→        <div className="flex items-stretch justify-around">
+   364→          {nav.filter((n) => !n.adminOnly).map((n) => (
+   365→            <button
+   366→              key={n.v}
+   367→              onClick={() => { setView(n.v); sfx.click(); }}
+   368→              className={`flex min-w-11 flex-1 flex-col items-center gap-0.5 py-2 text-[9px] font-bold ${view === n.v ? 'text-amber-400' : 'text-muted-foreground'}`}
+   369→            >
+   370→              {n.icon}
+   371→              {n.label}
+   372→            </button>
+   373→          ))}
+   374→        </div>
+   375→      </nav>
+   376→
+   377→      {/* ---------- rules dialog ---------- */}
+   378→      <Dialog open={rulesOpen} onOpenChange={setRulesOpen}>
+   379→        <DialogContent className="royal-card nice-scroll max-h-[85dvh] overflow-y-auto sm:max-w-md" aria-describedby={undefined} dir={LOCALE_META[locale].dir}>
+   380→          <DialogHeader>
+   381→            <DialogTitle className="gold-text">📜 {t('rules')}</DialogTitle>
+   382→          </DialogHeader>
+   383→          <p className="text-sm leading-relaxed text-foreground/90">{t('rules_full')}</p>
+   384→          <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-3 text-sm leading-relaxed">💡 {t('rules_tip')}</p>
+   385→          <p className="text-[11px] text-muted-foreground">⌨️ 1–9 = {t('nav_play')} (column drop)</p>
+   386→        </DialogContent>
+   387→      </Dialog>
+   388→
+   389→      {/* ---------- about dialog: company, mission, team, science ---------- */}
+   390→      <Dialog open={aboutOpen} onOpenChange={setAboutOpen}>
+   391→        <DialogContent className="royal-card nice-scroll max-h-[85dvh] overflow-y-auto sm:max-w-lg" aria-describedby={undefined} dir={LOCALE_META[locale].dir}>
+   392→          <DialogHeader>
+   393→            <DialogTitle className="gold-text">🎓 {t('about_title')}</DialogTitle>
+   394→          </DialogHeader>
+   395→
+   396→          {/* brand block */}
+   397→          <div className="flex items-center gap-3 rounded-xl border border-amber-500/25 bg-amber-500/5 p-3">
+   398→            <img src="/brand/logo.png" alt={t('company')} className="h-9 w-9 rounded-xl object-cover shadow-lg ring-1 ring-amber-500/40" />
+   399→            <img src="/brand/logo.png" alt={t('company')} className="h-14 w-14 rounded-xl object-cover shadow-lg" />
+   400→            <div className="leading-tight">
+   401→              <div className="text-sm font-black gold-text">{t('company')}</div>
+   402→              <div className="text-[11px] text-muted-foreground" dir="ltr">{t('company_en')}</div>
+   403→            </div>
+   404→          </div>
+   405→
+   406→          <p className="text-sm leading-relaxed text-foreground/90">{t('about_text')}</p>
+   407→
+   408→          <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-3">
+   409→            <h4 className="mb-1 text-xs font-black text-emerald-400">🕊️ {t('about_mission')}</h4>
+   410→            <p className="text-xs leading-relaxed text-foreground/85">{t('about_mission_text')}</p>
+   411→          </div>
+   412→
+   413→          {/* team */}
+   414→          <div>
+   415→            <h4 className="mb-2 text-xs font-black uppercase tracking-wide text-muted-foreground">{t('about_team')}</h4>
+   416→            <ul className="space-y-1.5">
+   417→              {([1, 2, 3, 4, 5, 6, 7] as const).map((i) => (
+   418→                <li key={i} className="rounded-lg bg-muted/40 px-3 py-1.5">
+   419→                  <span className="text-xs font-black">{t(`team${i}_name` as never)}</span>
+   420→                  <span className="block text-[11px] leading-snug text-muted-foreground">{t(`team${i}_role` as never)}</span>
+   421→                </li>
+   422→              ))}
+   423→            </ul>
+   424→          </div>
+   425→
+   426→          <p className="text-xs leading-relaxed text-muted-foreground">🔬 {t('hub_research')}</p>
+   427→          <div className="flex flex-wrap gap-2 pb-1 text-[11px] text-muted-foreground">
+   428→            <span className="rounded-full bg-muted px-2 py-1">Martinez et al. 2023</span>
+   429→            <span className="rounded-full bg-muted px-2 py-1">Trends Neurosci. Educ. 2021</span>
+   430→            <span className="rounded-full bg-muted px-2 py-1">SDT — Deci &amp; Ryan</span>
+   431→            <span className="rounded-full bg-muted px-2 py-1">Flow — Csikszentmihalyi</span>
+   432→          </div>
+   433→        </DialogContent>
+   434→      </Dialog>
+   435→
+   436→      {/* ---------- auth dialog ---------- */}
+   437→      <Dialog open={authOpen} onOpenChange={setAuthOpen}>
+   438→        <DialogContent className="royal-card sm:max-w-sm" aria-describedby={undefined} dir={LOCALE_META[locale].dir}>
+   439→          <DialogHeader>
+   440→            <DialogTitle className="text-center gold-text">{t('auth_welcome')}</DialogTitle>
+   441→          </DialogHeader>
+   442→          <div className="grid grid-cols-2 gap-1 rounded-xl bg-muted p-1">
+   443→            {(['login', 'register'] as const).map((tab) => (
+   444→              <button
+   445→                key={tab}
+   446→                className={`rounded-lg py-1.5 text-sm font-bold ${authTab === tab ? 'bg-amber-400/20 text-amber-400' : 'text-muted-foreground'}`}
+   447→                onClick={() => setAuthTab(tab)}
+   448→              >
+   449→                {t(tab)}
+   450→              </button>
+   451→            ))}
+   452→          </div>
+   453→          <div className="space-y-2">
+   454→            <Input dir="ltr" placeholder={t('username')} value={username} onChange={(e) => setUsername(e.target.value)} maxLength={16} autoComplete="username" />
+   455→            <Input dir="ltr" type="password" placeholder={t('password')} value={password} onChange={(e) => setPassword(e.target.value)} maxLength={72} autoComplete={authTab === 'login' ? 'current-password' : 'new-password'} />
+   456→            <button type="button" className="w-fit text-[11px] text-muted-foreground transition-colors hover:text-amber-400" onClick={openForgot}>
+   457→              {t('sms_forgot_link')}
+   458→            </button>
+   459→            <div className="text-[10px] text-muted-foreground">{t('auth_rules_user')} · {t('auth_rules_pass')}</div>
+   460→            <Button className="w-full glow-gold" disabled={busy || username.trim().length < 3 || password.length < 6} onClick={() => void doAuth(authTab)}>
+   461→              {busy ? '…' : t(authTab === 'login' ? 'login' : 'register')}
+   462→            </Button>
+   463→            <Button variant="outline" className="w-full" disabled={busy} onClick={() => void doAuth('guest')}>
+   464→              {t('auth_guest')}
+   465→            </Button>
+   466→            <p className="text-center text-[10px] text-muted-foreground">{t('auth_guest_hint')}</p>
+   467→          </div>
+   468→        </DialogContent>
+   469→      </Dialog>
+   470→
+   471→      {/* ---------- SMS forgot-password dialog (T9-a) ---------- */}
+   472→      <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
+   473→        <DialogContent className="royal-card sm:max-w-sm" aria-describedby={undefined} dir={LOCALE_META[locale].dir}>
+   474→          <DialogHeader>
+   475→            <DialogTitle className="gold-text">📱 {t('sms_forgot_title')}</DialogTitle>
+   476→          </DialogHeader>
+   477→          {forgotStep === 1 ? (
+   478→            <div className="space-y-2">
+   479→              <p className="text-xs leading-relaxed text-muted-foreground">{t('sms_forgot_desc')}</p>
+   480→              <Input
+   481→                dir="ltr"
+   482→                inputMode="tel"
+   483→                placeholder={`${t('sms_phone')} · ${t('sms_phone_hint')}`}
+   484→                value={fPhone}
+   485→                onChange={(e) => setFPhone(e.target.value)}
+   486→                maxLength={24}
+   487→                autoComplete="tel"
+   488→              />
+   489→              <Button className="w-full glow-gold" disabled={fBusy || fPhone.trim().length < 7} onClick={() => void requestSmsCode()}>
+   490→                {fBusy ? '…' : t('sms_send_code')}
+   491→              </Button>
+   492→            </div>
+   493→          ) : (
+   494→            <div className="space-y-2">
+   495→              {fDevCode && (
+   496→                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-center">
+   497→                  <div className="text-[10px] leading-relaxed text-amber-300/90">{t('sms_dev_code_note')}</div>
+   498→                  <div dir="ltr" className="mt-1 font-mono text-2xl font-black tracking-[0.35em] text-amber-400">{fDevCode}</div>
+   499→                </div>
+   500→              )}
+   501→              <p className="text-xs leading-relaxed text-muted-foreground">{t('sms_code_sent')}</p>
+   502→              <Input
+   503→                dir="ltr"
+   504→                inputMode="numeric"
+   505→                placeholder={t('sms_code')}
+   506→                value={fCode}
+   507→                onChange={(e) => setFCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+   508→                maxLength={6}
+   509→                autoComplete="one-time-code"
+   510→              />
+   511→              <Input
+   512→                dir="ltr"
+   513→                type="password"
+   514→                placeholder={t('sms_new_pass')}
+   515→                value={fPass}
+   516→                onChange={(e) => setFPass(e.target.value)}
+   517→                maxLength={72}
+   518→                autoComplete="new-password"
+   519→              />
+   520→              <Button className="w-full glow-gold" disabled={fBusy || fCode.length !== 6 || fPass.length < 6} onClick={() => void doSmsReset()}>
+   521→                {fBusy ? '…' : t('sms_reset_btn')}
+   522→              </Button>
+   523→              <Button variant="ghost" className="w-full text-xs text-muted-foreground" disabled={fBusy || resendIn > 0} onClick={() => void requestSmsCode()}>
+   524→                {resendIn > 0 ? `${t('sms_resend')} · ${localizeDigits(resendIn, locale)}` : t('sms_resend')}
+   525→              </Button>
+   526→            </div>
+   527→          )}
+   528→        </DialogContent>
+   529→      </Dialog>
+   530→    </div>
+   531→  );
+   532→}
+   533→
+   534→/* lazy-loaded meta views (built by platform sub-agents) */
+   535→import dynamic from 'next/dynamic';
+   536→const ArcadeLazy = dynamic(() => import('@/components/arcade/ArcadeView').then((m) => m.ArcadeView), {
+   537→  loading: () => <CenterSpinner />,
+   538→});
+   539→const StoreLazy = dynamic(() => import('@/components/store/StoreView').then((m) => m.StoreView), {
+   540→  loading: () => <CenterSpinner />,
+   541→});
+   542→const LeaderboardLazy = dynamic(() => import('@/components/leaderboard/LeaderboardView').then((m) => m.LeaderboardView), {
+   543→  loading: () => <CenterSpinner />,
+   544→});
+   545→const ProfileLazy = dynamic(() => import('@/components/profile/ProfileView').then((m) => m.ProfileView), {
+   546→  loading: () => <CenterSpinner />,
+   547→});
+   548→const AdminLazy = dynamic(() => import('@/components/admin/AdminView').then((m) => m.AdminView), {
+   549→  loading: () => <CenterSpinner />,
+   550→});
+   551→
+   552→function CenterSpinner() {
+   553→  return <div className="grid place-items-center py-32"><div className="h-10 w-10 animate-spin rounded-full border-4 border-amber-400/30 border-t-amber-400" /></div>;
+   554→}
+   555→
+   556→/** Smoothly tweens the header coin balance whenever it changes (count-up/down). */
+   557→function useCountUp(value: number, duration = 650): number {
+   558→  const [display, setDisplay] = useState(value);
+   559→  const fromRef = useRef(value);
+   560→  useEffect(() => {
+   561→    const from = fromRef.current;
+   562→    if (from === value) return;
+   563→    let raf = 0;
+   564→    const start = performance.now();
+   565→    const tick = (now: number) => {
+   566→      const p = Math.min(1, (now - start) / duration);
+   567→      const eased = 1 - Math.pow(1 - p, 3);
+   568→      const v = Math.round(from + (value - from) * eased);
+   569→      setDisplay(v);
+   570→      if (p < 1) raf = requestAnimationFrame(tick);
+   571→      else fromRef.current = value;
+   572→    };
+   573→    raf = requestAnimationFrame(tick);
+   574→    return () => cancelAnimationFrame(raf);
+   575→  }, [value, duration]);
+   576→  return display;
+   577→}
+   578→

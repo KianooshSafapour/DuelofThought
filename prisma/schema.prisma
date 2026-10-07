@@ -1,0 +1,386 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  usernameLower String  @unique
+  passwordHash String
+  role         String   @default("PLAYER") // PLAYER | ADMIN
+  isGuest      Boolean  @default(false)
+  banned       Boolean  @default(false)
+  banReason    String?
+  bannedUntil  DateTime? // null while banned = permanent
+  banCount     Int      @default(0)
+  coins        Int      @default(250)
+  xp           Int      @default(0)
+  level        Int      @default(1)
+  rating       Int      @default(1000)
+  wins         Int      @default(0)
+  losses       Int      @default(0)
+  draws        Int      @default(0)
+  gamesPlayed  Int      @default(0)
+  streak       Int      @default(0)
+  bestStreak   Int      @default(0)
+  locale       String   @default("fa")
+  bio          String   @default("")
+  // equipped item codes
+  pieceSkin    String   @default("piece_terracotta")
+  boardSkin    String   @default("board_classic")
+  background   String   @default("bg_royal_velvet")
+  effectSkin   String   @default("fx_confetti")
+  avatarItem   String   @default("avatar_seedling")
+  titleItem    String?
+  showcase     String   @default("[]") // JSON array of achievement ids (max 3)
+  soundOn      Boolean  @default(true)
+  checkinStreak Int     @default(0) // consecutive daily check-in days (0-7 cycle display)
+  lastCheckin  String   @default("") // dateKey (Tehran) of last claimed check-in
+  phone        String?  // optional mobile number for SMS password recovery (E.164-ish, unique when set)
+  emotePack    String   @default("emote_classic") // equipped emote pack code (EMOTE category)
+  celebrationPack String @default("celeb_confetti") // equipped celebration pack code (CELEBRATION category)
+  createdAt    DateTime @default(now())
+  lastSeen     DateTime @default(now())
+
+  sessions          Session[]
+  gamesP1           GameResult[] @relation("P1")
+  gamesP2           GameResult[] @relation("P2")
+  purchases         Purchase[]
+  achievements      UserAchievement[]
+  quests            UserQuest[]
+  reportsMade       Report[]        @relation("Reporter")
+  reportsAgainst    Report[]        @relation("Target")
+  auditLogs         AuditLog[]
+  chatLogs          ChatLog[]
+  events            AnalyticsEvent[]
+  weeklyClaims      WeeklyClaim[]
+  friendsStarted    Friendship[]   @relation("FriendOwner")
+  friendsReceived   Friendship[]   @relation("FriendTarget")
+  requestsSent      FriendRequest[] @relation("ReqFrom")
+  requestsReceived  FriendRequest[] @relation("ReqTo")
+  boxes             BoxGrant[]
+  arcadeScores      ArcadeScore[]
+  resetCodes        PasswordResetCode[]
+  boardsDesigned    BoardDefModel[]
+  chatSent          FriendChatMessage[] @relation("ChatFrom")
+  chatReceived      FriendChatMessage[] @relation("ChatTo")
+}
+
+model Session {
+  token     String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model GameResult {
+  id            String   @id @default(cuid())
+  mode          String   // PVE | LOCAL_PVP | ONLINE
+  ranked        Boolean  @default(false)
+  boardId       String
+  winner        String   // P1 | P2 | DRAW
+  endReason     String   // KIND | RUN | FULL | RESIGN | TIMEOUT | AGREED
+  winNumbers    String   @default("[]") // JSON numbers of the winning set
+  p1Id          String?
+  p1            User?    @relation("P1", fields: [p1Id], references: [id], onDelete: SetNull)
+  p2Id          String?
+  p2            User?    @relation("P2", fields: [p2Id], references: [id], onDelete: SetNull)
+  aiLevel       String?  // EASY | MEDIUM | HARD
+  p1Name        String   @default("")
+  p2Name        String   @default("")
+  moves         Int
+  firstMoveCol  Int      @default(-1)
+  durationMs    Int      @default(0)
+  movesData     String   @default("{}") // compact analytics JSON
+  p1RatingDelta Int      @default(0)
+  p2RatingDelta Int      @default(0)
+  coinsAwarded  Int      @default(0)
+  xpAwarded     Int      @default(0)
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([mode])
+}
+
+model StoreItem {
+  code          String  @id
+  category      String  // PIECE | BOARD | AVATAR | BACKGROUND | EFFECT | TITLE
+  rarity        String  @default("COMMON") // COMMON | RARE | EPIC | LEGENDARY
+  price         Int     @default(0)
+  requiredLevel Int     @default(1)
+  data          String  @default("{}") // JSON palette/seed data
+  active        Boolean @default(true)
+  sortOrder     Int     @default(0)
+  sales         Int     @default(0)
+  createdAt     DateTime @default(now())
+  purchases     Purchase[]
+}
+
+model Purchase {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      StoreItem @relation(fields: [itemId], references: [code], onDelete: Cascade)
+  price     Int
+  createdAt DateTime @default(now())
+
+  @@unique([userId, itemId])
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  progress      Int      @default(0)
+  unlockedAt    DateTime?
+  claimed       Boolean  @default(false)
+
+  @@unique([userId, achievementId])
+}
+
+model UserQuest {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questId   String
+  dateKey   String
+  progress  Int      @default(0)
+  goal      Int
+  reward    Int
+  claimed   Boolean  @default(false)
+
+  @@unique([userId, questId, dateKey])
+}
+
+model Report {
+  id         String    @id @default(cuid())
+  reporterId String?
+  reporter   User?     @relation("Reporter", fields: [reporterId], references: [id], onDelete: SetNull)
+  targetId   String?
+  target     User?     @relation("Target", fields: [targetId], references: [id], onDelete: SetNull)
+  targetName String    @default("")
+  reason     String    // INSULT | CHEAT | SPAM | NAME | OTHER
+  details    String    @default("")
+  chatExcerpt String   @default("")
+  status     String    @default("OPEN") // OPEN | ACTIONED | DISMISSED
+  adminNote  String    @default("")
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([status])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  targetId  String?
+  details   String   @default("")
+  createdAt DateTime @default(now())
+}
+
+model Announcement {
+  id        String   @id @default(cuid())
+  titleFa   String
+  titleEn   String
+  titleAr   String
+  titleTr   String
+  bodyFa    String
+  bodyEn    String
+  bodyAr    String
+  bodyTr    String
+  kind      String   @default("INFO") // INFO | EVENT | WARNING
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model BannedWord {
+  id        String   @id @default(cuid())
+  word      String   @unique
+  severity  Int      @default(1) // 1=mask, 2=mask+flag, 3=auto-punish
+  createdAt DateTime @default(now())
+}
+
+model ChatLog {
+  id           String   @id @default(cuid())
+  roomId       String   @default("")
+  senderId     String?
+  sender       User?    @relation(fields: [senderId], references: [id], onDelete: SetNull)
+  senderName   String   @default("")
+  text         String
+  masked       Boolean  @default(false)
+  flaggedWords String   @default("")
+  createdAt    DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model AnalyticsEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type      String
+  payload   String   @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([type])
+  @@index([createdAt])
+}
+
+model WeeklyClaim {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weekKey   String   // Saturday-anchored week id, e.g. "2026-09-12" (Tehran)
+  rank      Int      // final rank in that week's race (1-based)
+  reward    Int      // coins granted
+  claimedAt DateTime @default(now())
+
+  @@unique([userId, weekKey])
+}
+
+/** Pending friend request (directed). */
+model FriendRequest {
+  id        String   @id @default(cuid())
+  fromId    String
+  from      User     @relation("ReqFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId      String
+  to        User     @relation("ReqTo", fields: [toId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([fromId, toId])
+  @@index([toId])
+}
+
+/** Accepted friendship — stored in BOTH directions for O(1) list queries. */
+model Friendship {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation("FriendOwner", fields: [userId], references: [id], onDelete: Cascade)
+  friendId  String
+  friend    User     @relation("FriendTarget", fields: [friendId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, friendId])
+  @@index([friendId])
+}
+
+/* ================= v0.1.0-alpha: loot boxes / arcade / platform config ================= */
+
+/** A fortune-chest product ( purchasable with coins, giftable by admins ). */
+model LootBoxDef {
+  code     String        @id
+  rarity   String @default("COMMON") // box tier: COMMON..ULTIMATE
+  price    Int           @default(300)
+  image    String        @default("")
+  active   Boolean       @default(true)
+  opens    Int           @default(0)
+  createdAt DateTime      @default(now())
+  drops    LootBoxDrop[]
+}
+
+/** One weighted entry in a chest's loot pool. */
+model LootBoxDrop {
+  id        String     @id @default(cuid())
+  boxCode   String
+  box       LootBoxDef @relation(fields: [boxCode], references: [code], onDelete: Cascade)
+  kind      String // COINS | XP | ITEM
+  itemCode  String?
+  amount    Int        @default(0) // coin/xp amount (ITEM uses item price at roll time)
+  weight    Int        @default(1)
+}
+
+/** An unopened chest in a player's inventory. */
+model BoxGrant {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  boxCode   String
+  source    String    @default("PURCHASE") // PURCHASE | GIFT | ADMIN
+  openedAt  DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, openedAt])
+}
+
+/** Cross-game arcade result (shared economy — points usable platform-wide). */
+model ArcadeScore {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  game         String   // orbit | synapse | stellar
+  score        Int
+  meta         String   @default("{}") // game-specific JSON (mission, accuracy, star type…)
+  coinsAwarded Int      @default(0)
+  xpAwarded    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([game, score])
+  @@index([userId, createdAt])
+}
+
+/** Runtime feature flags (game management by admins). */
+model PlatformConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/* ================= v0.2.0-alpha: SMS reset / board designer / supervised chat ================= */
+
+/** One-time SMS recovery code (hashed at rest; 10-min TTL; attempt-capped). */
+model PasswordResetCode {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@index([userId, createdAt])
+}
+
+/** A custom 9×7 board designed by the developer team (admin Board Designer). */
+model BoardDefModel {
+  id        String   @id @default(cuid())
+  code      String   @unique // slug, e.g. "custom-fork-pattern"
+  nameFa    String   @default("")
+  nameEn    String   @default("")
+  layout    String   // JSON: number[] of length 63, bottom-first rows, values 0..9 (0 = blank cell)
+  published Boolean  @default(false)
+  createdBy String?
+  author    User?    @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  plays     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/** One supervised direct message between friends (filtered, flaggable, auditable). */
+model FriendChatMessage {
+  id           String    @id @default(cuid())
+  fromId       String
+  from         User      @relation("ChatFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  toId         String
+  to           User      @relation("ChatTo", fields: [toId], references: [id], onDelete: Cascade)
+  body         String
+  masked       Boolean   @default(false)
+  flagged      Boolean   @default(false)
+  flaggedWords String    @default("")
+  severity     Int       @default(0) // 0 clean · 1 masked · 2 mask+flag · 3 blocked (auto-punish handled upstream)
+  readAt       DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([fromId, toId, createdAt])
+  @@index([toId, readAt])
+}

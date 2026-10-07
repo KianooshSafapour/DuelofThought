@@ -1,0 +1,702 @@
+  1556→      rr(ctx, PAD - 10, PAD - 10, WORLD_W - 2 * (PAD - 10), WORLD_H - 2 * (PAD - 10), 20);
+  1557→      ctx.stroke();
+  1558→      ctx.restore();
+  1559→
+  1560→      /* pulsing obstacles */
+  1561→      for (const w of g.arena.walls) {
+  1562→        const pulse = 0.5 + 0.14 * Math.sin(g.time / 460 + w.x * 0.02 + w.y * 0.013);
+  1563→        rr(ctx, w.x, w.y, w.w, w.h, 7);
+  1564→        ctx.fillStyle = 'rgba(10,15,28,0.95)';
+  1565→        ctx.fill();
+  1566→        ctx.strokeStyle = theme.wall;
+  1567→        ctx.globalAlpha = pulse + 0.3;
+  1568→        ctx.lineWidth = 2;
+  1569→        ctx.save();
+  1570→        ctx.shadowColor = theme.wall;
+  1571→        ctx.shadowBlur = 9;
+  1572→        ctx.stroke();
+  1573→        ctx.restore();
+  1574→        ctx.globalAlpha = 1;
+  1575→      }
+  1576→
+  1577→      /* pickups */
+  1578→      for (const p of g.pickups) {
+  1579→        const col = p.kind === 'shield' ? '#38bdf8' : p.kind === 'repair' ? '#34d399' : '#fbbf24';
+  1580→        const fade = p.life < 3000 && Math.floor(p.life / 240) % 2 === 0 ? 0.35 : 1;
+  1581→        ctx.save();
+  1582→        ctx.translate(p.x, p.y + Math.sin(p.t / 320) * 3);
+  1583→        ctx.rotate(p.t / 700);
+  1584→        ctx.globalAlpha = fade;
+  1585→        ctx.beginPath();
+  1586→        for (let i = 0; i < 6; i++) {
+  1587→          const a = (Math.PI / 3) * i;
+  1588→          const px2 = Math.cos(a) * 10;
+  1589→          const py2 = Math.sin(a) * 10;
+  1590→          if (i === 0) ctx.moveTo(px2, py2); else ctx.lineTo(px2, py2);
+  1591→        }
+  1592→        ctx.closePath();
+  1593→        ctx.fillStyle = 'rgba(2,6,23,0.9)';
+  1594→        ctx.fill();
+  1595→        ctx.strokeStyle = col;
+  1596→        ctx.lineWidth = 2;
+  1597→        ctx.save();
+  1598→        ctx.shadowColor = col;
+  1599→        ctx.shadowBlur = 10;
+  1600→        ctx.stroke();
+  1601→        ctx.restore();
+  1602→        ctx.fillStyle = col;
+  1603→        ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
+  1604→        ctx.restore();
+  1605→      }
+  1606→
+  1607→      /* generator */
+  1608→      if (g.gen) {
+  1609→        const gen = g.gen;
+  1610→        ctx.save();
+  1611→        ctx.translate(gen.x, gen.y);
+  1612→        /* rotating shield ring */
+  1613→        ctx.save();
+  1614→        ctx.rotate(gen.spin);
+  1615→        ctx.strokeStyle = 'rgba(244,63,94,0.7)';
+  1616→        ctx.lineWidth = 3;
+  1617→        ctx.setLineDash([12, 9]);
+  1618→        ctx.beginPath();
+  1619→        ctx.arc(0, 0, GEN_HALF + 16, 0, Math.PI * 2);
+  1620→        ctx.stroke();
+  1621→        ctx.setLineDash([]);
+  1622→        ctx.restore();
+  1623→        /* core */
+  1624→        ctx.beginPath();
+  1625→        for (let i = 0; i < 6; i++) {
+  1626→          const a = (Math.PI / 3) * i + Math.PI / 6;
+  1627→          const px2 = Math.cos(a) * GEN_HALF;
+  1628→          const py2 = Math.sin(a) * GEN_HALF;
+  1629→          if (i === 0) ctx.moveTo(px2, py2); else ctx.lineTo(px2, py2);
+  1630→        }
+  1631→        ctx.closePath();
+  1632→        ctx.fillStyle = gen.flashT > 0 ? '#fecdd3' : 'rgba(30,10,18,0.95)';
+  1633→        ctx.save();
+  1634→        ctx.shadowColor = '#f43f5e';
+  1635→        ctx.shadowBlur = 18;
+  1636→        ctx.fill();
+  1637→        ctx.restore();
+  1638→        ctx.strokeStyle = '#fb7185';
+  1639→        ctx.lineWidth = 3;
+  1640→        ctx.stroke();
+  1641→        /* heart pulse */
+  1642→        const beat = 0.6 + 0.4 * Math.sin(g.time / 240);
+  1643→        ctx.fillStyle = `rgba(244,63,94,${0.4 + 0.4 * beat})`;
+  1644→        ctx.beginPath();
+  1645→        ctx.arc(0, 0, 13 + 4 * beat, 0, Math.PI * 2);
+  1646→        ctx.fill();
+  1647→        ctx.restore();
+  1648→        /* hp bar */
+  1649→        const frac = gen.hp / gen.maxHp;
+  1650→        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  1651→        rr(ctx, gen.x - 44, gen.y - GEN_HALF - 26, 88, 9, 4);
+  1652→        ctx.fill();
+  1653→        ctx.fillStyle = frac > 0.4 ? '#fb7185' : '#f43f5e';
+  1654→        rr(ctx, gen.x - 42, gen.y - GEN_HALF - 24, 84 * Math.max(0, frac), 5, 2.5);
+  1655→        ctx.fill();
+  1656→      }
+  1657→
+  1658→      /* beams (special + tesla arcs) */
+  1659→      for (const b of g.beams) {
+  1660→        ctx.save();
+  1661→        ctx.globalAlpha = clamp(b.life / 240, 0, 1);
+  1662→        ctx.strokeStyle = b.c;
+  1663→        ctx.lineWidth = 5;
+  1664→        ctx.shadowColor = b.c;
+  1665→        ctx.shadowBlur = 14;
+  1666→        ctx.beginPath();
+  1667→        ctx.moveTo(b.x1, b.y1);
+  1668→        ctx.lineTo(b.x2, b.y2);
+  1669→        ctx.stroke();
+  1670→        ctx.restore();
+  1671→      }
+  1672→
+  1673→      /* bullets (glow) */
+  1674→      ctx.save();
+  1675→      ctx.globalCompositeOperation = 'lighter';
+  1676→      for (const p of g.bullets) {
+  1677→        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 2.6);
+  1678→        grad.addColorStop(0, p.friendly ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.85)');
+  1679→        grad.addColorStop(0.4, p.friendly ? `${p.color}aa` : `${p.color}88`);
+  1680→        grad.addColorStop(1, 'rgba(0,0,0,0)');
+  1681→        ctx.fillStyle = grad;
+  1682→        ctx.beginPath();
+  1683→        ctx.arc(p.x, p.y, p.r * 2.6, 0, Math.PI * 2);
+  1684→        ctx.fill();
+  1685→        ctx.fillStyle = p.friendly ? '#ffffff' : p.color;
+  1686→        ctx.beginPath();
+  1687→        ctx.arc(p.x, p.y, p.r * 0.55, 0, Math.PI * 2);
+  1688→        ctx.fill();
+  1689→        ctx.strokeStyle = p.friendly ? `${p.color}55` : `${p.color}55`;
+  1690→        ctx.lineWidth = 2.2;
+  1691→        ctx.beginPath();
+  1692→        ctx.moveTo(p.x, p.y);
+  1693→        ctx.lineTo(p.x - p.vx * 2.2, p.y - p.vy * 2.2);
+  1694→        ctx.stroke();
+  1695→      }
+  1696→      /* particles */
+  1697→      for (const p of g.parts) {
+  1698→        ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+  1699→        ctx.fillStyle = p.c;
+  1700→        ctx.beginPath();
+  1701→        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  1702→        ctx.fill();
+  1703→      }
+  1704→      ctx.restore();
+  1705→
+  1706→      /* drones */
+  1707→      for (const d of g.drones) drawDrone(d);
+  1708→
+  1709→      /* player */
+  1710→      drawPlayer();
+  1711→
+  1712→      /* score popups */
+  1713→      ctx.textAlign = 'center';
+  1714→      ctx.textBaseline = 'middle';
+  1715→      for (const p of g.pops) {
+  1716→        ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+  1717→        ctx.font = '900 17px ui-sans-serif, system-ui, sans-serif';
+  1718→        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+  1719→        ctx.lineWidth = 3.5;
+  1720→        ctx.strokeText(p.txt, p.x, p.y);
+  1721→        ctx.fillStyle = p.c;
+  1722→        ctx.fillText(p.txt, p.x, p.y);
+  1723→      }
+  1724→      ctx.globalAlpha = 1;
+  1725→
+  1726→      /* aim reticle */
+  1727→      if ((g.aimMode === 'mouse' || g.aimMode === 'manual') && g.phase === 'playing') {
+  1728→        ctx.save();
+  1729→        ctx.translate(g.aim.x, g.aim.y);
+  1730→        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  1731→        ctx.lineWidth = 1.4;
+  1732→        ctx.beginPath();
+  1733→        ctx.arc(0, 0, 9, 0, Math.PI * 2);
+  1734→        ctx.moveTo(-13, 0); ctx.lineTo(-5, 0);
+  1735→        ctx.moveTo(5, 0); ctx.lineTo(13, 0);
+  1736→        ctx.moveTo(0, -13); ctx.lineTo(0, -5);
+  1737→        ctx.moveTo(0, 5); ctx.lineTo(0, 13);
+  1738→        ctx.stroke();
+  1739→        ctx.restore();
+  1740→      }
+  1741→
+  1742→      ctx.restore(); // world
+  1743→
+  1744→      /* damage flash vignette */
+  1745→      if (g.hitFlash > 0) {
+  1746→        const vg = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, VIEW_H * 0.3, VIEW_W / 2, VIEW_H / 2, VIEW_H * 0.75);
+  1747→        vg.addColorStop(0, 'rgba(244,63,94,0)');
+  1748→        vg.addColorStop(1, `rgba(244,63,94,${0.4 * g.hitFlash})`);
+  1749→        ctx.fillStyle = vg;
+  1750→        ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  1751→      }
+  1752→
+  1753→      /* off-screen enemy hints (edge arrows) */
+  1754→      if (g.phase === 'playing') {
+  1755→        for (const d of g.drones) {
+  1756→          if (d.state === 'spawn') continue;
+  1757→          const sx = d.x - g.camX;
+  1758→          const sy = d.y - g.camY;
+  1759→          if (sx > 8 && sx < VIEW_W - 8 && sy > 8 && sy < VIEW_H - 8) continue;
+  1760→          const ax = clamp(sx, 14, VIEW_W - 14);
+  1761→          const ay = clamp(sy, 14, VIEW_H - 14);
+  1762→          ctx.save();
+  1763→          ctx.translate(ax, ay);
+  1764→          ctx.rotate(Math.atan2(d.y - (g.camY + ay), d.x - (g.camX + ax)));
+  1765→          ctx.globalAlpha = 0.55;
+  1766→          ctx.fillStyle = DRONE_KIND_COLORS[d.kind];
+  1767→          ctx.beginPath();
+  1768→          ctx.moveTo(7, 0);
+  1769→          ctx.lineTo(-4, -4.5);
+  1770→          ctx.lineTo(-4, 4.5);
+  1771→          ctx.closePath();
+  1772→          ctx.fill();
+  1773→          ctx.restore();
+  1774→        }
+  1775→      }
+  1776→    };
+  1777→
+  1778→    const drawDrone = (d: Drone) => {
+  1779→      const col = DRONE_KIND_COLORS[d.kind];
+  1780→      const spawning = d.state === 'spawn';
+  1781→      const prog = spawning ? clamp(1 - d.spawnT / (d.kind === 'boss' ? 1400 : 900), 0, 1) : 1;
+  1782→      const rad = d.kind === 'boss' ? BOSS_R : DRONE_R;
+  1783→      ctx.save();
+  1784→      ctx.translate(d.x, d.y);
+  1785→      ctx.globalAlpha = spawning ? prog * 0.9 : 1;
+  1786→      const sc = 0.4 + 0.6 * prog;
+  1787→      ctx.scale(sc, sc);
+  1788→      if (spawning) {
+  1789→        ctx.strokeStyle = col;
+  1790→        ctx.globalAlpha = (1 - prog) * 0.8;
+  1791→        ctx.lineWidth = 2;
+  1792→        ctx.beginPath();
+  1793→        ctx.arc(0, 0, rad + 30 * (1 - prog) + 6, 0, Math.PI * 2);
+  1794→        ctx.stroke();
+  1795→        ctx.globalAlpha = prog * 0.9;
+  1796→      }
+  1797→      /* rotor ring */
+  1798→      ctx.save();
+  1799→      ctx.rotate(d.spin);
+  1800→      ctx.strokeStyle = col;
+  1801→      ctx.globalAlpha *= 0.6;
+  1802→      ctx.lineWidth = 2;
+  1803→      ctx.setLineDash([5, 7]);
+  1804→      ctx.beginPath();
+  1805→      ctx.arc(0, 0, rad + (d.kind === 'boss' ? 12 : 6), 0, Math.PI * 2);
+  1806→      ctx.stroke();
+  1807→      ctx.setLineDash([]);
+  1808→      ctx.restore();
+  1809→      /* hull */
+  1810→      ctx.save();
+  1811→      ctx.rotate(d.bodyAng);
+  1812→      ctx.beginPath();
+  1813→      if (d.kind === 'boss') {
+  1814→        for (let i = 0; i < 8; i++) {
+  1815→          const a = (Math.PI / 4) * i;
+  1816→          const rr2 = rad * (i % 2 === 0 ? 1 : 0.82);
+  1817→          const px2 = Math.cos(a) * rr2;
+  1818→          const py2 = Math.sin(a) * rr2;
+  1819→          if (i === 0) ctx.moveTo(px2, py2); else ctx.lineTo(px2, py2);
+  1820→        }
+  1821→      } else {
+  1822→        for (let i = 0; i < 6; i++) {
+  1823→          const a = (Math.PI / 3) * i;
+  1824→          const px2 = Math.cos(a) * rad;
+  1825→          const py2 = Math.sin(a) * rad;
+  1826→          if (i === 0) ctx.moveTo(px2, py2); else ctx.lineTo(px2, py2);
+  1827→        }
+  1828→      }
+  1829→      ctx.closePath();
+  1830→      ctx.fillStyle = 'rgba(2,6,23,0.92)';
+  1831→      ctx.save();
+  1832→      ctx.shadowColor = col;
+  1833→      ctx.shadowBlur = d.kind === 'boss' ? 20 : 10;
+  1834→      ctx.fill();
+  1835→      ctx.restore();
+  1836→      ctx.strokeStyle = col;
+  1837→      ctx.lineWidth = d.kind === 'boss' ? 3 : 2;
+  1838→      ctx.stroke();
+  1839→      /* boss phase ring */
+  1840→      if (d.kind === 'boss' && d.phase) {
+  1841→        ctx.strokeStyle = d.phase === 3 ? '#fca5a5' : d.phase === 2 ? '#fb923c' : '#fda4af';
+  1842→        ctx.lineWidth = 2;
+  1843→        ctx.beginPath();
+  1844→        ctx.arc(0, 0, rad - 6, 0, Math.PI * 2 * clamp(d.hp / d.maxHp, 0, 1));
+  1845→        ctx.stroke();
+  1846→      }
+  1847→      ctx.restore();
+  1848→      /* barrel + eye */
+  1849→      ctx.rotate(d.gunAng);
+  1850→      ctx.strokeStyle = col;
+  1851→      ctx.lineWidth = d.kind === 'boss' ? 5 : 3;
+  1852→      ctx.beginPath();
+  1853→      ctx.moveTo(rad * 0.4, 0);
+  1854→      ctx.lineTo(rad + (d.kind === 'boss' ? 16 : 7), 0);
+  1855→      ctx.stroke();
+  1856→      ctx.fillStyle = col;
+  1857→      ctx.beginPath();
+  1858→      ctx.arc(rad * 0.35, 0, d.kind === 'boss' ? 7 : 3.4, 0, Math.PI * 2);
+  1859→      ctx.fill();
+  1860→      /* aim telegraph */
+  1861→      if (d.state === 'aim') {
+  1862→        const prog2 = 1 - d.aimT / droneSpecLocal(d).aimMs;
+  1863→        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  1864→        ctx.beginPath();
+  1865→        ctx.arc(rad + 10, 0, 1.5 + prog2 * 3.5, 0, Math.PI * 2);
+  1866→        ctx.fill();
+  1867→      }
+  1868→      if (d.flashT > 0) {
+  1869→        ctx.globalAlpha = (d.flashT / 130) * 0.85;
+  1870→        ctx.fillStyle = '#ffffff';
+  1871→        ctx.beginPath();
+  1872→        ctx.arc(0, 0, rad, 0, Math.PI * 2);
+  1873→        ctx.fill();
+  1874→      }
+  1875→      ctx.restore();
+  1876→      /* hp pips */
+  1877→      if (!spawning && d.kind !== 'boss' && d.maxHp > 1) {
+  1878→        for (let i = 0; i < d.maxHp; i++) {
+  1879→          ctx.fillStyle = i < d.hp ? col : 'rgba(255,255,255,0.16)';
+  1880→          ctx.beginPath();
+  1881→          ctx.arc(d.x - (d.maxHp - 1) * 3.4 + i * 6.8, d.y - DRONE_R - 9, 2, 0, Math.PI * 2);
+  1882→          ctx.fill();
+  1883→        }
+  1884→      }
+  1885→    };
+  1886→
+  1887→    const drawPlayer = () => {
+  1888→      const blink = g.invT > 0 && Math.floor(g.time / 90) % 2 === 0;
+  1889→      /* glow trail */
+  1890→      if (!lowFx && g.trail.length > 1) {
+  1891→        ctx.save();
+  1892→        ctx.globalCompositeOperation = 'lighter';
+  1893→        for (let i = 0; i < g.trail.length; i++) {
+  1894→          const tr = g.trail[i];
+  1895→          const a = (i / g.trail.length) * 0.22;
+  1896→          ctx.globalAlpha = a;
+  1897→          ctx.fillStyle = g.glow;
+  1898→          ctx.beginPath();
+  1899→          ctx.arc(tr.x, tr.y, PLAYER_R * (0.4 + 0.5 * (i / g.trail.length)), 0, Math.PI * 2);
+  1900→          ctx.fill();
+  1901→        }
+  1902→        ctx.restore();
+  1903→      }
+  1904→      ctx.save();
+  1905→      ctx.translate(g.px, g.py);
+  1906→      ctx.globalAlpha = blink ? 0.35 : 1;
+  1907→      /* treads */
+  1908→      ctx.save();
+  1909→      ctx.rotate(g.hullAng);
+  1910→      ctx.fillStyle = 'rgba(30,41,59,0.95)';
+  1911→      ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+  1912→      ctx.lineWidth = 1;
+  1913→      rr(ctx, -14, -13, 28, 6.5, 3);
+  1914→      ctx.fill(); ctx.stroke();
+  1915→      rr(ctx, -14, 6.5, 28, 6.5, 3);
+  1916→      ctx.fill(); ctx.stroke();
+  1917→      /* hull */
+  1918→      rr(ctx, -13, -9, 26, 18, 5);
+  1919→      ctx.save();
+  1920→      ctx.shadowColor = g.glow;
+  1921→      ctx.shadowBlur = 12;
+  1922→      const hullG = ctx.createLinearGradient(-13, -9, 13, 9);
+  1923→      hullG.addColorStop(0, '#1e293b');
+  1924→      hullG.addColorStop(0.55, g.color);
+  1925→      hullG.addColorStop(1, g.glow);
+  1926→      ctx.fillStyle = hullG;
+  1927→      ctx.fill();
+  1928→      ctx.restore();
+  1929→      ctx.strokeStyle = g.glow;
+  1930→      ctx.lineWidth = 1.4;
+  1931→      ctx.stroke();
+  1932→      ctx.restore();
+  1933→      /* turret + barrel */
+  1934→      ctx.save();
+  1935→      ctx.rotate(g.gunAng);
+  1936→      ctx.fillStyle = g.glow;
+  1937→      ctx.save();
+  1938→      ctx.shadowColor = g.glow;
+  1939→      ctx.shadowBlur = 8;
+  1940→      rr(ctx, 2, -2.8, PLAYER_R + 10, 5.6, 2.8);
+  1941→      ctx.fill();
+  1942→      ctx.restore();
+  1943→      ctx.beginPath();
+  1944→      ctx.arc(0, 0, 7.4, 0, Math.PI * 2);
+  1945→      ctx.fillStyle = g.color;
+  1946→      ctx.fill();
+  1947→      ctx.strokeStyle = g.glow;
+  1948→      ctx.lineWidth = 1.6;
+  1949→      ctx.stroke();
+  1950→      /* muzzle flash */
+  1951→      if (g.muzzleT > 0) {
+  1952→        ctx.globalAlpha = g.muzzleT / 90;
+  1953→        ctx.fillStyle = '#fffbeb';
+  1954→        ctx.beginPath();
+  1955→        ctx.arc(PLAYER_R + 11, 0, 5 + Math.random() * 3, 0, Math.PI * 2);
+  1956→        ctx.fill();
+  1957→        ctx.globalAlpha = blink ? 0.35 : 1;
+  1958→      }
+  1959→      ctx.restore();
+  1960→      /* special-ready aura */
+  1961→      const spCost = g.params.special === 'blink' ? 40 : 100;
+  1962→      if (g.energy >= spCost) {
+  1963→        ctx.strokeStyle = `rgba(255,255,255,${0.25 + 0.2 * Math.sin(g.time / 180)})`;
+  1964→        ctx.lineWidth = 1.6;
+  1965→        ctx.beginPath();
+  1966→        ctx.arc(0, 0, PLAYER_R + 12, 0, Math.PI * 2);
+  1967→        ctx.stroke();
+  1968→      }
+  1969→      /* shield */
+  1970→      if (g.shieldT > 0 || g.shieldHits > 0) {
+  1971→        ctx.strokeStyle = `rgba(56,189,248,${0.55 + 0.3 * Math.sin(g.time / 140)})`;
+  1972→        ctx.lineWidth = 2.2;
+  1973→        ctx.beginPath();
+  1974→        ctx.arc(0, 0, PLAYER_R + 9, 0, Math.PI * 2);
+  1975→        ctx.stroke();
+  1976→        if (g.shieldHits > 0) {
+  1977→          ctx.fillStyle = '#38bdf8';
+  1978→          for (let i = 0; i < g.shieldHits; i++) {
+  1979→            ctx.beginPath();
+  1980→            ctx.arc(-4 + i * 8, -PLAYER_R - 14, 2.4, 0, Math.PI * 2);
+  1981→            ctx.fill();
+  1982→          }
+  1983→        }
+  1984→      }
+  1985→      /* heat overheat ring */
+  1986→      if (g.overheated) {
+  1987→        ctx.strokeStyle = 'rgba(248,113,113,0.8)';
+  1988→        ctx.lineWidth = 2;
+  1989→        ctx.beginPath();
+  1990→        ctx.arc(0, 0, PLAYER_R + 15, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (g.heat / HEAT_MAX));
+  1991→        ctx.stroke();
+  1992→      }
+  1993→      ctx.restore();
+  1994→    };
+  1995→
+  1996→    const drawStick = () => {
+  1997→      if (!g.stick.active) return;
+  1998→      ctx.save();
+  1999→      ctx.globalAlpha = 0.5;
+  2000→      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  2001→      ctx.lineWidth = 2;
+  2002→      ctx.beginPath();
+  2003→      ctx.arc(g.stick.ox - g.camX, g.stick.oy - g.camY, 38, 0, Math.PI * 2);
+  2004→      ctx.stroke();
+  2005→      ctx.fillStyle = 'rgba(244,63,94,0.45)';
+  2006→      ctx.beginPath();
+  2007→      ctx.arc(g.stick.ox + g.stick.dx * 30 - g.camX, g.stick.oy + g.stick.dy * 30 - g.camY, 16, 0, Math.PI * 2);
+  2008→      ctx.fill();
+  2009→      ctx.restore();
+  2010→    };
+  2011→
+  2012→    const draw = () => {
+  2013→      const scale = canvas.width / VIEW_W;
+  2014→      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  2015→      drawGrid();
+  2016→      drawStick();
+  2017→    };
+  2018→
+  2019→    /* ------------------------------ loop ------------------------------ */
+  2020→    let raf = 0;
+  2021→    let prev = performance.now();
+  2022→    let lastRender = 0;
+  2023→    const FRAME_MIN = lowFx ? 33 : 0;
+  2024→    const loop = (now: number) => {
+  2025→      raf = requestAnimationFrame(loop);
+  2026→      if (document.hidden) { prev = now; return; }
+  2027→      const dt = clamp(now - prev, 0, 34);
+  2028→      if (FRAME_MIN && now - lastRender < FRAME_MIN) return;
+  2029→      lastRender = now;
+  2030→      prev = now;
+  2031→      update(dt, dt / (1000 / 60));
+  2032→      draw();
+  2033→    };
+  2034→    raf = requestAnimationFrame(loop);
+  2035→
+  2036→    /* opening banner */
+  2037→    {
+  2038→      const tt = useApp.getState().t;
+  2039→      if (mission.kind === 'boss') {
+  2040→        showBanner(tt('tt_boss_warning'), `${tt('tt_kind_boss')} · ${tt('tt_level_n')} ${dNum2(mission.level)}`, true);
+  2041→        sfx.bad();
+  2042→        g.bannerT = 2100;
+  2043→      } else if (mission.kind === 'survive') {
+  2044→        showBanner(tt('tt_survive_ready'), `${tt('tt_hud_time')} ${dNum2(Math.round(mission.surviveMs / 1000))}s`);
+  2045→      } else if (mission.kind === 'siege') {
+  2046→        showBanner(tt('tt_objective_siege'), tt('tt_kind_siege'));
+  2047→      } else {
+  2048→        showBanner(`${tt('tt_hud_wave')} 1 / ${dNum2(mission.waves)}`, tt('tt_objective_clear'));
+  2049→      }
+  2050→      g.wave = mission.kind === 'clear' ? 0 : 1;
+  2051→      if (mission.kind === 'clear') { g.waveQueue = 0; g.spawnT = 0; } // director starts wave 1
+  2052→      if (mission.kind === 'boss') {
+  2053→        g.bossSpawned = true;
+  2054→        spawnBoss();
+  2055→      }
+  2056→      if (mission.kind === 'siege') g.spawnT = 800;
+  2057→      if (mission.kind === 'survive') g.spawnT = 900;
+  2058→    }
+  2059→
+  2060→    /* --------------------------- keyboard ----------------------------- */
+  2061→    const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+  2062→    const onKeyDown = (e: KeyboardEvent) => {
+  2063→      const target = e.target as HTMLElement | null;
+  2064→      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+  2065→      const k = e.key.toLowerCase();
+  2066→      if (k === 'escape') { e.preventDefault(); togglePause(); return; }
+  2067→      if (k === ' ') { e.preventDefault(); fireKeyRef.current = true; return; }
+  2068→      if (k === 'shift') { e.preventDefault(); if (g.phase === 'playing') playerSpecial(); return; }
+  2069→      if (MOVE_KEYS.includes(k)) { e.preventDefault(); g.keys.add(k); }
+  2070→    };
+  2071→    const onKeyUp = (e: KeyboardEvent) => {
+  2072→      const k = e.key.toLowerCase();
+  2073→      if (k === ' ') fireKeyRef.current = false;
+  2074→      else if (MOVE_KEYS.includes(k)) g.keys.delete(k);
+  2075→    };
+  2076→    const onWinPointerUp = (e: PointerEvent) => {
+  2077→      if (e.pointerType === 'mouse') fireMouseRef.current = false;
+  2078→    };
+  2079→    const onVisibility = () => {
+  2080→      if (document.hidden && g.phase === 'playing') { g.phase = 'paused'; setPhase('paused'); }
+  2081→    };
+  2082→    window.addEventListener('keydown', onKeyDown);
+  2083→    window.addEventListener('keyup', onKeyUp);
+  2084→    window.addEventListener('pointerup', onWinPointerUp);
+  2085→    document.addEventListener('visibilitychange', onVisibility);
+  2086→
+  2087→    /* HUD mirror ticker */
+  2088→    const hudTimer = window.setInterval(() => {
+  2089→      const live = g.drones.filter((d) => d.kind !== 'boss' && d.state !== 'spawn').length + g.drones.filter((d) => d.kind !== 'boss' && d.state === 'spawn').length;
+  2090→      const boss = g.drones.find((d) => d.kind === 'boss');
+  2091→      setHud({
+  2092→        hp: g.hp, maxHp: g.params.maxHp,
+  2093→        heat: Math.round(g.heat), energy: Math.round(g.energy),
+  2094→        score: liveScore(),
+  2095→        wave: g.wave, waves: g.mission.waves,
+  2096→        left: live,
+  2097→        timeLeft: g.mission.kind === 'survive' ? Math.max(0, Math.ceil(g.surviveT / 1000)) : 0,
+  2098→        bossFrac: boss ? clamp(boss.hp / boss.maxHp, 0, 1) : -1,
+  2099→        genFrac: g.gen ? clamp(g.gen.hp / g.gen.maxHp, 0, 1) : -1,
+  2100→        specialPct: Math.round(g.energy),
+  2101→        overheated: g.overheated,
+  2102→        shield: g.shieldT > 0 || g.shieldHits > 0,
+  2103→      });
+  2104→    }, 110);
+  2105→
+  2106→    const liveScore = () => {
+  2107→      let s = SCORE_WIN + g.mission.level * 8;
+  2108→      s += g.kills * (SCORE_KILL_BASE + g.mission.level * 4);
+  2109→      if (g.bossKill) s += SCORE_BOSS;
+  2110→      if (g.hitsTaken === 0) s += SCORE_PERFECT;
+  2111→      return Math.min(s, 2000);
+  2112→    };
+  2113→
+  2114→    const togglePause = () => {
+  2115→      if (g.phase === 'playing') { g.phase = 'paused'; setPhase('paused'); sfx.click(); }
+  2116→      else if (g.phase === 'paused') { g.phase = 'playing'; setPhase('playing'); sfx.click(); }
+  2117→    };
+  2118→    pauseRef.current = togglePause;
+  2119→
+  2120→    /* keep counters reachable from fireBullet/damageDrone */
+  2121→    (g as Game & { shots: number; hitCount: number }).shots = 0;
+  2122→    (g as Game & { shots: number; hitCount: number }).hitCount = 0;
+  2123→
+  2124→    /* patch winMission to use real accuracy counters */
+  2125→    const accOf = () => {
+  2126→      const sh = (g as Game & { shots: number }).shots as number;
+  2127→      const hi = (g as Game & { hitCount: number }).hitCount as number;
+  2128→      return sh > 0 ? Math.round((hi / sh) * 100) : 100;
+  2129→    };
+  2130→    accRef.current = accOf;
+  2131→
+  2132→    return () => {
+  2133→      cancelAnimationFrame(raf);
+  2134→      ro.disconnect();
+  2135→      window.clearInterval(hudTimer);
+  2136→      window.removeEventListener('keydown', onKeyDown);
+  2137→      window.removeEventListener('keyup', onKeyUp);
+  2138→      window.removeEventListener('pointerup', onWinPointerUp);
+  2139→      document.removeEventListener('visibilitychange', onVisibility);
+  2140→      for (const id of timers) window.clearTimeout(id);
+  2141→      gRef.current = null;
+  2142→    };
+  2143→    // eslint-disable-next-line react-hooks/exhaustive-deps
+  2144→  }, [runKey, screen, perfMode]);
+  2145→
+  2146→  /* refs the engine effect needs without re-running */
+  2147→  const pauseRef = useRef<() => void>(() => undefined);
+  2148→  const accRef = useRef<() => number>(() => 100);
+  2149→
+  2150→  /* --------------------- arena pointer input --------------------- */
+  2151→  const toWorld = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  2152→    const el = e.currentTarget;
+  2153→    const r = el.getBoundingClientRect();
+  2154→    const g = gRef.current;
+  2155→    const vx = (e.clientX - r.left) * (VIEW_W / Math.max(1, r.width));
+  2156→    const vy = (e.clientY - r.top) * (VIEW_H / Math.max(1, r.height));
+  2157→    return { x: vx + (g?.camX ?? 0), y: vy + (g?.camY ?? 0) };
+  2158→  };
+  2159→
+  2160→  const onCanvasPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  2161→    const g = gRef.current;
+  2162→    if (!g || g.phase !== 'playing') return;
+  2163→    const p = toWorld(e);
+  2164→    if (e.pointerType === 'mouse') {
+  2165→      if (e.button !== 0) return;
+  2166→      g.aimMode = 'mouse';
+  2167→      g.aim = { x: p.x, y: p.y };
+  2168→      fireMouseRef.current = true;
+  2169→    } else if (p.x < g.camX + VIEW_W / 2) {
+  2170→      /* double-tap → blink (mirage) */
+  2171→      const now = performance.now();
+  2172→      if (now - stickTapRef.current < 300 && g.params.blink && g.energy >= 40) {
+  2173→        g.aim = { x: g.px + (p.x - g.px) * 2, y: g.py + (p.y - g.py) * 2 };
+  2174→        playerSpecialPublic();
+  2175→      }
+  2176→      stickTapRef.current = now;
+  2177→      g.stick = { active: true, id: e.pointerId, ox: p.x, oy: p.y, dx: 0, dy: 0 };
+  2178→    } else {
+  2179→      g.aimMode = 'manual';
+  2180→      g.aim = { x: p.x, y: p.y };
+  2181→    }
+  2182→  };
+  2183→
+  2184→  /* ---- portrait virtual joystick pad (DOM, below the arena) ---- */
+  2185→  const padActiveRef = useRef<{ id: number; cx: number; cy: number } | null>(null);
+  2186→  const onPadDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+  2187→    const g = gRef.current;
+  2188→    if (!g || g.phase !== 'playing') return;
+  2189→    const r = e.currentTarget.getBoundingClientRect();
+  2190→    padActiveRef.current = { id: e.pointerId, cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+  2191→    g.stick = { active: true, id: e.pointerId, ox: g.px, oy: g.py, dx: 0, dy: 0 };
+  2192→    e.currentTarget.setPointerCapture(e.pointerId);
+  2193→  };
+  2194→  const onPadMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+  2195→    const g = gRef.current;
+  2196→    const pad = padActiveRef.current;
+  2197→    if (!g || !pad || pad.id !== e.pointerId || !g.stick.active) return;
+  2198→    let dx = (e.clientX - pad.cx) / (pad.cx ? 52 : 52);
+  2199→    let dy = (e.clientY - pad.cy) / 52;
+  2200→    const m = Math.hypot(dx, dy);
+  2201→    if (m > 1) { dx /= m; dy /= m; }
+  2202→    g.stick.dx = dx; g.stick.dy = dy;
+  2203→  };
+  2204→  const onPadUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+  2205→    const g = gRef.current;
+  2206→    const pad = padActiveRef.current;
+  2207→    if (g && pad && pad.id === e.pointerId) {
+  2208→      g.stick = { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 };
+  2209→      padActiveRef.current = null;
+  2210→    }
+  2211→  };
+  2212→
+  2213→  const playerSpecialPublic = () => {
+  2214→    /* re-implementation bridge: the effect owns playerSpecial; simulate via key event */
+  2215→    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' }));
+  2216→  };
+  2217→
+  2218→  const onCanvasPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  2219→    const g = gRef.current;
+  2220→    if (!g) return;
+  2221→    const p = toWorld(e);
+  2222→    if (e.pointerType === 'mouse') {
+  2223→      if (g.aimMode !== 'manual') { g.aimMode = 'mouse'; g.aim = { x: p.x, y: p.y }; }
+  2224→    } else if (g.stick.active && g.stick.id === e.pointerId) {
+  2225→      let dx = (p.x - g.stick.ox) / 46;
+  2226→      let dy = (p.y - g.stick.oy) / 46;
+  2227→      const m = Math.hypot(dx, dy);
+  2228→      if (m > 1) { dx /= m; dy /= m; }
+  2229→      g.stick.dx = dx;
+  2230→      g.stick.dy = dy;
+  2231→    } else if (g.aimMode === 'manual') {
+  2232→      g.aim = { x: p.x, y: p.y };
+  2233→    }
+  2234→  };
+  2235→
+  2236→  const onCanvasPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  2237→    const g = gRef.current;
+  2238→    if (!g) return;
+  2239→    if (e.pointerType === 'mouse') {
+  2240→      fireMouseRef.current = false;
+  2241→    } else if (g.stick.active && g.stick.id === e.pointerId) {
+  2242→      g.stick = { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 };
+  2243→    }
+  2244→  };
+  2245→
+  2246→  /* ============================== HUD ============================== */
+  2247→
+  2248→  const inGame = screen === 'game';
+  2249→  const objectiveLabel =
+  2250→    hud === null ? '' :
+  2251→    hud.bossFrac >= 0 ? t('tt_objective_boss') :
+  2252→    hud.genFrac >= 0 ? t('tt_objective_siege') : '';
+  2253→
+  2254→  /* ============================== screens ============================== */
+  2255→
+
+[showing lines 1556-2255 of 3079; use offset=2256 with limit to continue reading]

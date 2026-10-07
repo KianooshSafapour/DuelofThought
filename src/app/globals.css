@@ -1,0 +1,359 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-vazir), "Vazirmatn", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Courier New", monospace;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.75rem;
+  /* Royal night theme: deep violet + gold (no blue/indigo) */
+  --background: oklch(0.16 0.04 300);
+  --foreground: oklch(0.95 0.02 85);
+  --card: oklch(0.21 0.05 300);
+  --card-foreground: oklch(0.95 0.02 85);
+  --popover: oklch(0.2 0.05 300);
+  --popover-foreground: oklch(0.95 0.02 85);
+  --primary: oklch(0.83 0.14 85); /* gold */
+  --primary-foreground: oklch(0.2 0.05 300);
+  --secondary: oklch(0.27 0.06 295);
+  --secondary-foreground: oklch(0.95 0.02 85);
+  --muted: oklch(0.26 0.04 300);
+  --muted-foreground: oklch(0.72 0.03 85);
+  --accent: oklch(0.3 0.08 330);
+  --accent-foreground: oklch(0.95 0.02 85);
+  --destructive: oklch(0.6 0.2 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.35 0.05 300);
+  --input: oklch(0.3 0.05 300);
+  --ring: oklch(0.83 0.14 85);
+  --chart-1: oklch(0.83 0.14 85);
+  --chart-2: oklch(0.75 0.15 330);
+  --chart-3: oklch(0.75 0.14 160);
+  --chart-4: oklch(0.8 0.12 60);
+  --chart-5: oklch(0.7 0.15 300);
+  --sidebar: oklch(0.21 0.05 300);
+  --sidebar-foreground: oklch(0.95 0.02 85);
+  --sidebar-primary: oklch(0.83 0.14 85);
+  --sidebar-primary-foreground: oklch(0.2 0.05 300);
+  --sidebar-accent: oklch(0.27 0.06 295);
+  --sidebar-accent-foreground: oklch(0.95 0.02 85);
+  --sidebar-border: oklch(0.35 0.05 300);
+  --sidebar-ring: oklch(0.83 0.14 85);
+}
+
+.dark {
+  --background: oklch(0.16 0.04 300);
+  --foreground: oklch(0.95 0.02 85);
+  --card: oklch(0.21 0.05 300);
+  --card-foreground: oklch(0.95 0.02 85);
+  --popover: oklch(0.2 0.05 300);
+  --popover-foreground: oklch(0.95 0.02 85);
+  --primary: oklch(0.83 0.14 85);
+  --primary-foreground: oklch(0.2 0.05 300);
+  --secondary: oklch(0.27 0.06 295);
+  --secondary-foreground: oklch(0.95 0.02 85);
+  --muted: oklch(0.26 0.04 300);
+  --muted-foreground: oklch(0.72 0.03 85);
+  --accent: oklch(0.3 0.08 330);
+  --accent-foreground: oklch(0.95 0.02 85);
+  --destructive: oklch(0.6 0.2 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.35 0.05 300);
+  --input: oklch(0.3 0.05 300);
+  --ring: oklch(0.83 0.14 85);
+  --chart-1: oklch(0.83 0.14 85);
+  --chart-2: oklch(0.75 0.15 330);
+  --chart-3: oklch(0.75 0.14 160);
+  --chart-4: oklch(0.8 0.12 60);
+  --chart-5: oklch(0.7 0.15 300);
+  --sidebar: oklch(0.21 0.05 300);
+  --sidebar-foreground: oklch(0.95 0.02 85);
+  --sidebar-primary: oklch(0.83 0.14 85);
+  --sidebar-primary-foreground: oklch(0.2 0.05 300);
+  --sidebar-accent: oklch(0.27 0.06 295);
+  --sidebar-accent-foreground: oklch(0.95 0.02 85);
+  --sidebar-border: oklch(0.35 0.05 300);
+  --sidebar-ring: oklch(0.83 0.14 85);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    min-height: 100dvh;
+  }
+  html[dir="rtl"] body {
+    letter-spacing: 0;
+  }
+}
+
+/* ---------- pixel art rendering ---------- */
+.pixelated {
+  image-rendering: pixelated;
+}
+
+/* ---------- royal glow utilities ---------- */
+.gold-text {
+  background: linear-gradient(135deg, #fde68a 0%, #f59e0b 45%, #b45309 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.royal-card {
+  background: linear-gradient(160deg, rgba(255, 215, 130, 0.07), rgba(150, 80, 220, 0.06) 55%, rgba(0, 0, 0, 0.12));
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(6px);
+}
+.glow-gold {
+  box-shadow: 0 0 18px rgba(251, 191, 36, 0.35), 0 0 4px rgba(251, 191, 36, 0.5);
+}
+.glow-purple {
+  box-shadow: 0 0 22px rgba(192, 132, 252, 0.4);
+}
+
+/* ---------- animations ---------- */
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+.animate-floaty { animation: floaty 4s ease-in-out infinite; }
+
+@keyframes dropBounce {
+  0% { transform: translateY(-260%) scale(1); opacity: 0.4; }
+  60% { transform: translateY(0) scale(1.04, 0.92); opacity: 1; }
+  75% { transform: translateY(-12%) scale(0.98, 1.03); }
+  100% { transform: translateY(0) scale(1); }
+}
+.animate-drop { animation: dropBounce 0.45s cubic-bezier(0.22, 0.9, 0.3, 1.2) both; }
+
+@keyframes winPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.7); }
+  50% { box-shadow: 0 0 0 10px rgba(251, 191, 36, 0); }
+}
+.animate-win-pulse { animation: winPulse 1.1s ease-out infinite; }
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.shimmer {
+  background: linear-gradient(110deg, transparent 40%, rgba(255, 255, 255, 0.25) 50%, transparent 60%);
+  background-size: 200% 100%;
+  animation: shimmer 2.4s linear infinite;
+}
+
+@keyframes popIn {
+  0% { transform: scale(0.6); opacity: 0; }
+  70% { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.animate-pop { animation: popIn 0.35s cubic-bezier(0.2, 1.4, 0.4, 1) both; }
+
+@keyframes coinFly {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-70px) scale(1.35); opacity: 0; }
+}
+.animate-coin-fly { animation: coinFly 1.1s ease-out both; }
+
+@keyframes shakeX {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+.animate-shake { animation: shakeX 0.3s ease-in-out; }
+
+/* ---------- card shine sweep (hover polish for store/park cards) ---------- */
+.card-shine { overflow: hidden; }
+/* positioned-anchor fallback for the shine sweep — skip fixed elements
+   (dialogs): unlayered CSS would otherwise override Tailwind's .fixed
+   and throw the modal into document flow (off-screen bug) */
+.card-shine:not(.fixed) { position: relative; }
+.card-shine::after {
+  content: '';
+  position: absolute;
+  top: -60%;
+  bottom: -60%;
+  left: -35%;
+  width: 34%;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.13), transparent);
+  transform: translateX(-140%) rotate(8deg);
+}
+.card-shine:hover::after { transform: translateX(460%) rotate(8deg); transition: transform 0.75s ease; }
+
+/* ---------- custom scrollbar ---------- */
+.nice-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+.nice-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); border-radius: 8px; }
+.nice-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #b45309, #f59e0b);
+  border-radius: 8px;
+  border: 2px solid rgba(0, 0, 0, 0.2);
+}
+.nice-scroll { scrollbar-width: thin; scrollbar-color: #f59e0b rgba(255,255,255,0.04); }
+
+/* ---------- board look ---------- */
+.board-frame {
+  border: 10px solid;
+  border-image: linear-gradient(135deg, #d9a860, #8f6534 40%, #d9a860 60%, #7a5226) 1;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), inset 0 0 30px rgba(0, 0, 0, 0.35);
+}
+
+/* safe area for fixed footers */
+.pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* ---------- micro-interaction: tactile press feedback ---------- */
+/* applied to prominent CTAs (glow-gold) — scales down on press, springs back */
+.glow-gold { transition: transform 0.12s ease, box-shadow 0.2s ease; }
+.glow-gold:active:not(:disabled) { transform: scale(0.96); }
+
+/* generic pressable utility for chips/pills/rows */
+.pressable { transition: transform 0.12s ease; }
+.pressable:active { transform: scale(0.97); }
+
+/* ---------- leaderboard/friends row entrance (staggered via --row-delay) ---------- */
+@keyframes rowEnter {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.row-enter {
+  animation: rowEnter 0.32s cubic-bezier(0.22, 0.9, 0.3, 1) both;
+  animation-delay: var(--row-delay, 0ms);
+}
+
+/* ---------- chat bubbles (online duel chat) ---------- */
+.chat-bubble {
+  max-width: 88%;
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.9rem;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.chat-bubble-own {
+  margin-inline-start: auto;
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  border-end-end-radius: 0.25rem;
+}
+.chat-bubble-other {
+  margin-inline-end: auto;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-end-start-radius: 0.25rem;
+}
+
+/* ---------- a11y: consistent amber keyboard focus ring ---------- */
+:where(a, button, input, select, textarea, summary, [role="button"], [role="tab"], [role="option"]):focus-visible {
+  outline: 2px solid rgba(245, 158, 11, 0.75);
+  outline-offset: 2px;
+}
+
+/* ---------- typography: balance long headings (RTL-safe) ---------- */
+h1, h2, h3, h4 { text-wrap: balance; }
+
+/* ---------- a11y: respect reduced-motion preferences ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pop,
+  .animate-coin-fly,
+  .animate-shake,
+  .row-enter { animation: none !important; }
+  .glow-gold, .pressable { transition: none !important; }
+  .glow-gold:active, .pressable:active { transform: none !important; }
+  .card-shine::after { display: none; }
+  .win-fireworks { display: none; }
+}
+
+/* ---------- micro-interaction: subtle press feedback on royal cards ---------- */
+.royal-card { transition: border-color 0.2s ease, box-shadow 0.25s ease, transform 0.2s ease; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   PERFORMANCE & IMMERSIVE GAME MODES
+   .perf   — user toggled "reduce effects": pause all decorative
+             platform animations to save CPU/GPU on weak devices.
+   .gaming — a game is running: platform chrome is hidden by AppShell;
+             these rules additionally freeze residual animations and
+             kill scroll-chaining/selection so the device is 100% for
+             the game (mobile: no pull-to-refresh, no accidental text
+             selection, no rubber-banding).
+   ═══════════════════════════════════════════════════════════════════ */
+html.perf .gold-text,
+html.perf .glow-gold,
+html.perf .card-shine::after,
+html.perf .win-fireworks,
+html.perf .animate-pulse,
+html.perf .animate-ping,
+html.perf .animate-bounce,
+html.perf .animate-spin:not(.perf-keep) {
+  animation: none !important;
+}
+html.perf .glow-gold { box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35) !important; }
+html.perf .card-shine::after { display: none !important; }
+
+html.gaming {
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+html.gaming .gold-text,
+html.gaming .glow-gold,
+html.gaming .card-shine::after,
+html.gaming .animate-pulse,
+html.gaming .animate-ping {
+  animation-play-state: paused !important;
+}
+html.gaming canvas { touch-action: none; }
+
+/* fullscreen game shell: safe-area padding for notched phones */
+.game-immersive {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--background, #09011b);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: env(safe-area-inset-top);
+}

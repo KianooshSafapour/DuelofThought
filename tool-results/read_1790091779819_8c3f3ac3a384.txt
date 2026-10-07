@@ -1,0 +1,488 @@
+     1→/**
+     2→ * Game content catalog: store items (skins/avatars/backgrounds/titles/effects),
+     3→ * achievements, daily quests, rarity tiers. Item `data` JSON drives the
+     4→ * procedural pixel-art renderer (client) so no binary art assets are needed.
+     5→ */
+     6→
+     7→export type Rarity = 'COMMON' | 'RARE' | 'EPIC' | 'LEGENDARY' | 'ULTIMATE';
+     8→export type ItemCategory = 'PIECE' | 'BOARD' | 'AVATAR' | 'BACKGROUND' | 'EFFECT' | 'TITLE' | 'EMOTE';
+     9→
+    10→export interface ItemDef {
+    11→  code: string;
+    12→  category: ItemCategory;
+    13→  rarity: Rarity;
+    14→  price: number;
+    15→  requiredLevel: number;
+    16→  data: Record<string, unknown>;
+    17→}
+    18→
+    19→export const RARITY_META: Record<Rarity, { color: string; glow: string; order: number }> = {
+    20→  COMMON: { color: '#9ca3af', glow: 'rgba(156,163,175,.35)', order: 0 },
+    21→  RARE: { color: '#34d399', glow: 'rgba(52,211,153,.4)', order: 1 },
+    22→  EPIC: { color: '#c084fc', glow: 'rgba(192,132,252,.45)', order: 2 },
+    23→  LEGENDARY: { color: '#fbbf24', glow: 'rgba(251,191,36,.55)', order: 3 },
+    24→  ULTIMATE: { color: '#f43f5e', glow: 'rgba(244,63,94,.6)', order: 4 },
+    25→};
+    26→
+    27→/** Every piece skin defines palettes for BOTH sides + a pixel pattern seed. */
+    28→const piece = (code: string, rarity: Rarity, price: number, p1: string[], p2: string[], seed: number, nameGlow?: string): ItemDef =>
+    29→  ({ code, category: 'PIECE', rarity, price, requiredLevel: rarity === 'ULTIMATE' ? 12 : rarity === 'LEGENDARY' ? 6 : rarity === 'EPIC' ? 3 : 1, data: { p1, p2, seed, glow: nameGlow ?? p1[0] } });
+    30→
+    31→const avatar = (code: string, rarity: Rarity, price: number, seed: number, pal: string[]): ItemDef =>
+    32→  ({ code, category: 'AVATAR', rarity, price, requiredLevel: 1, data: { seed, pal } });
+    33→
+    34→const bg = (code: string, rarity: Rarity, price: number, kind: string, colors: string[], accent: string): ItemDef =>
+    35→  ({ code, category: 'BACKGROUND', rarity, price, requiredLevel: 1, data: { kind, colors, accent } });
+    36→
+    37→const board = (code: string, rarity: Rarity, price: number, pal: Record<string, string>): ItemDef =>
+    38→  ({ code, category: 'BOARD', rarity, price, requiredLevel: rarity === 'ULTIMATE' ? 12 : rarity === 'EPIC' ? 3 : 1, data: pal });
+    39→
+    40→const fx = (code: string, rarity: Rarity, price: number, colors: string[], shape: string): ItemDef =>
+    41→  ({ code, category: 'EFFECT', rarity, price, requiredLevel: 1, data: { colors, shape } });
+    42→
+    43→const title = (code: string, rarity: Rarity, price: number, reqLevel: number): ItemDef =>
+    44→  ({ code, category: 'TITLE', rarity, price, requiredLevel: reqLevel, data: {} });
+    45→
+    46→export const STORE_ITEMS: ItemDef[] = [
+    47→  /* ---------- EMOTE PACKS (functional: swaps the in-duel emote bar) ---------- */
+    48→  { code: 'emote_classic', category: 'EMOTE', rarity: 'COMMON', price: 0, requiredLevel: 1, data: { emotes: [
+    49→    { id: 'gg', emoji: '🤝' }, { id: 'oops', emoji: '😅' }, { id: 'hurry', emoji: '⏰' }, { id: 'thanks', emoji: '🙏' }, { id: 'laugh', emoji: '😄' },
+    50→  ] } },
+    51→  { code: 'emote_scholar', category: 'EMOTE', rarity: 'RARE', price: 600, requiredLevel: 3, data: { emotes: [
+    52→    { id: 'bow', emoji: '🙇' }, { id: 'quill', emoji: '🪶' }, { id: 'scroll', emoji: '📜' }, { id: 'lamp', emoji: '🪔' }, { id: 'brain', emoji: '🧠' },
+    53→  ] } },
+    54→  { code: 'emote_cosmos', category: 'EMOTE', rarity: 'EPIC', price: 1500, requiredLevel: 6, data: { emotes: [
+    55→    { id: 'zoom', emoji: '🚀' }, { id: 'twinkle', emoji: '🌟' }, { id: 'comet', emoji: '☄️' }, { id: 'wonder', emoji: '🛰️' }, { id: 'ringed', emoji: '🪐' },
+    56→  ] } },
+    57→  { code: 'emote_silkroad', category: 'EMOTE', rarity: 'LEGENDARY', price: 2800, requiredLevel: 9, data: { emotes: [
+    58→    { id: 'camel', emoji: '🐪' }, { id: 'strings', emoji: '🪕' }, { id: 'teapot', emoji: '🫖' }, { id: 'spice', emoji: '🫙' }, { id: 'falcon', emoji: '🦅' },
+    59→  ] } },
+    60→
+    61→  /* ---------- v0.2 UNIQUE COLLECTION ---------- */
+    62→
+    63→  /* ---------- PIECES ---------- */
+    64→  piece('piece_terracotta', 'COMMON', 0, ['#e8965a', '#c96f3b', '#f7c59f'], ['#7fc8a9', '#4e9d7d', '#c9ecd9'], 19041),
+    65→  piece('piece_rose', 'COMMON', 180, ['#f472b6', '#be185d', '#fbcfe8'], ['#a3e635', '#4d7c0f', '#d9f99d'], 28411),
+    66→  piece('piece_jade', 'COMMON', 200, ['#34d399', '#065f46', '#a7f3d0'], ['#fb923c', '#c2410c', '#fed7aa'], 33729),
+    67→  piece('piece_royal', 'RARE', 520, ['#c084fc', '#6b21a8', '#e9d5ff'], ['#fbbf24', '#b45309', '#fde68a'], 41593, '#c084fc'),
+    68→  piece('piece_obsidian', 'RARE', 600, ['#e5e7eb', '#4b5563', '#9ca3af'], ['#f59e0b', '#78350f', '#fcd34d'], 51017),
+    69→  piece('piece_sunset', 'RARE', 650, ['#fb7185', '#9f1239', '#fecdd3'], ['#fbbf24', '#92400e', '#fef3c7'], 62201),
+    70→  piece('piece_aurora', 'EPIC', 1400, ['#5eead4', '#0f766e', '#99f6e4'], ['#f9a8d4', '#9d174d', '#fbcfe8'], 71413, '#5eead4'),
+    71→  piece('piece_firoozeh', 'EPIC', 1500, ['#2dd4bf', '#0f766e', '#99f6e4'], ['#fda4af', '#9f1239', '#fecdd3'], 87209, '#2dd4bf'), // Persian turquoise
+    72→  piece('piece_pharaoh', 'EPIC', 1600, ['#fcd34d', '#92400e', '#fef9c3'], ['#a8a29e', '#44403c', '#e7e5e4'], 83021),
+    73→  piece('piece_prism', 'LEGENDARY', 4200, ['#f43f5e', '#f59e0b', '#10b981'], ['#8b5cf6', '#ec4899', '#14b8a6'], 99123, '#f43f5e'),
+    74→
+    75→  /* ---------- BOARDS ---------- */
+    76→  board('board_classic', 'COMMON', 0, { frame: '#b98a4e', frame2: '#8f6534', cell: '#e3b878', cell2: '#d9a860', line: '#7a5226', numeral: '#4a2e12', hole: '#faf6ee', grass: '#5c9e54' }),
+    77→  board('board_royal', 'RARE', 700, { frame: '#4c1d95', frame2: '#2e1065', cell: '#6d28d9', cell2: '#5b21b6', line: '#c4b5fd', numeral: '#fde68a', hole: '#efe9ff', grass: '#8b5cf6' }),
+    78→  board('board_jade', 'RARE', 750, { frame: '#065f46', frame2: '#022c22', cell: '#10b981', cell2: '#059669', line: '#a7f3d0', numeral: '#ecfdf5', hole: '#f0fdf4', grass: '#34d399' }),
+    79→  board('board_desert', 'RARE', 700, { frame: '#b45309', frame2: '#78350f', cell: '#f59e0b', cell2: '#d97706', line: '#fde68a', numeral: '#7c2d12', hole: '#fffbeb', grass: '#fbbf24' }),
+    80→  board('board_neon', 'EPIC', 1500, { frame: '#18181b', frame2: '#000000', cell: '#27272a', cell2: '#1f1f23', line: '#f0abfc', numeral: '#5eead4', hole: '#09090b', grass: '#e879f9' }),
+    81→  board('board_marble', 'EPIC', 1600, { frame: '#94a3b8', frame2: '#475569', cell: '#e2e8f0', cell2: '#cbd5e1', line: '#64748b', numeral: '#1e293b', hole: '#f8fafc', grass: '#38bdf8' }),
+    82→  board('board_crimson', 'EPIC', 1500, { frame: '#7f1d1d', frame2: '#450a0a', cell: '#b91c1c', cell2: '#991b1b', line: '#fecaca', numeral: '#fff7ed', hole: '#fef2f2', grass: '#ef4444' }),
+    83→  board('board_persia', 'LEGENDARY', 2400, { frame: '#115e59', frame2: '#042f2e', cell: '#14b8a6', cell2: '#0d9488', line: '#99f6e4', numeral: '#fefce8', hole: '#f0fdfa', grass: '#fbbf24' }), // Persian tilework
+    84→
+    85→  /* ---------- AVATARS (procedural pixel faces) ---------- */
+    86→  avatar('avatar_seedling', 'COMMON', 0, 1111, ['#84cc16', '#365314', '#ecfccb']),
+    87→  avatar('avatar_owl', 'COMMON', 150, 2222, ['#a16207', '#422006', '#fef3c7']),
+    88→  avatar('avatar_fennec', 'COMMON', 150, 3333, ['#f97316', '#7c2d12', '#ffedd5']),
+    89→  avatar('avatar_lotus', 'RARE', 480, 4444, ['#f472b6', '#831843', '#fce7f3']),
+    90→  avatar('avatar_simo', 'RARE', 500, 5555, ['#14b8a6', '#134e4a', '#ccfbf1']),
+    91→  avatar('avatar_shir', 'RARE', 520, 6666, ['#eab308', '#713f12', '#fef9c3']),
+    92→  avatar('avatar_bot', 'EPIC', 1300, 7777, ['#a3a3a3', '#171717', '#5eead4']),
+    93→  avatar('avatar_moon', 'EPIC', 1400, 8888, ['#c084fc', '#3b0764', '#f3e8ff']),
+    94→  avatar('avatar_homa', 'RARE', 550, 12121, ['#f59e0b', '#7c2d12', '#fef3c7']), // mythical homa bird
+    95→  avatar('avatar_dragon', 'LEGENDARY', 3600, 9999, ['#ef4444', '#450a0a', '#fbbf24']),
+    96→
+    97→  /* ---------- BACKGROUNDS ---------- */
+    98→  bg('bg_royal_velvet', 'COMMON', 0, 'velvet', ['#0f0524', '#1e1145', '#2a1a5e'], '#d4af37'),
+    99→  bg('bg_starfield', 'RARE', 650, 'stars', ['#020617', '#0f172a', '#1e293b'], '#fbbf24'),
+   100→  bg('bg_pixel_city', 'RARE', 700, 'city', ['#1a0b2e', '#2d1b4e', '#443266'], '#f472b6'),
+   101→  bg('bg_dunes', 'EPIC', 1400, 'dunes', ['#431407', '#7c2d12', '#b45309'], '#fcd34d'),
+   102→  bg('bg_emerald', 'EPIC', 1400, 'stars', ['#022c22', '#064e3b', '#065f46'], '#34d399'),
+   103→  bg('bg_aurora', 'EPIC', 1500, 'stars', ['#042f2e', '#134e4a', '#115e59'], '#5eead4'),
+   104→
+   105→  /* ---------- EFFECTS (win celebrations) ---------- */
+   106→  fx('fx_confetti', 'COMMON', 0, ['#fbbf24', '#f472b6', '#34d399', '#c084fc'], 'confetti'),
+   107→  fx('fx_gold', 'RARE', 550, ['#fcd34d', '#f59e0b', '#fffbeb'], 'coins'),
+   108→  fx('fx_pixels', 'RARE', 550, ['#5eead4', '#e879f9', '#fde047'], 'pixels'),
+   109→  fx('fx_galaxy', 'EPIC', 1800, ['#c084fc', '#5eead4', '#f0abfc', '#fde047'], 'pixels'),
+   110→  fx('fx_phoenix', 'LEGENDARY', 3200, ['#f97316', '#ef4444', '#fbbf24'], 'phoenix'),
+   111→
+   112→  /* ---------- TITLES ---------- */
+   113→  title('title_thinker', 'COMMON', 300, 1),
+   114→  title('title_quad', 'RARE', 800, 3),
+   115→  title('title_star', 'RARE', 700, 4),
+   116→  title('title_mathematician', 'EPIC', 1800, 5),
+   117→  title('title_legend', 'LEGENDARY', 4000, 8),
+   118→
+   119→  /* ================= v0.1.0-alpha: full-market expansion ================= */
+   120→  /* ---------- PIECES ---------- */
+   121→  piece('piece_gol', 'COMMON', 160, ['#fda4af', '#9f1239', '#fecdd3'], ['#fdba74', '#9a3412', '#ffedd5'], 41411),
+   122→  piece('piece_zafran', 'RARE', 700, ['#f59e0b', '#b45309', '#fef3c7'], ['#22d3ee', '#155e75', '#cffafe'], 52571, '#f59e0b'), // saffron
+   123→  piece('piece_lapis', 'EPIC', 1500, ['#60a5fa', '#1e3a8a', '#bfdbfe'], ['#fcd34d', '#92400e', '#fef9c3'], 63591, '#60a5fa'), // lapis lazuli
+   124→  piece('piece_perspolis', 'LEGENDARY', 2800, ['#fbbf24', '#78350f', '#fef3c7'], ['#38bdf8', '#075985', '#e0f2fe'], 74615, '#fbbf24'),
+   125→  piece('piece_orbit', 'EPIC', 1600, ['#2dd4bf', '#134e4a', '#99f6e4'], ['#fbbf24', '#78350f', '#fde68a'], 85717, '#2dd4bf'),
+   126→  piece('piece_quasar', 'ULTIMATE', 7500, ['#f43f5e', '#4c0519', '#fecdd3'], ['#fde047', '#713f12', '#fef9c3'], 96419, '#f43f5e'),
+   127→
+   128→  /* ---------- BOARDS ---------- */
+   129→  board('board_mosaic', 'RARE', 780, { frame: '#155e75', frame2: '#083344', cell: '#06b6d4', cell2: '#0891b2', line: '#a5f3fc', numeral: '#ecfeff', hole: '#ecfeff', grass: '#fbbf24' }), // Persian mosaic
+   130→  board('board_bazaar', 'EPIC', 1550, { frame: '#7c2d12', frame2: '#431407', cell: '#ea580c', cell2: '#c2410c', line: '#fed7aa', numeral: '#fff7ed', hole: '#fff7ed', grass: '#fbbf24' }),
+   131→  board('board_nebula', 'ULTIMATE', 7800, { frame: '#0c0a1d', frame2: '#050510', cell: '#1e1b4b', cell2: '#171335', line: '#e879f9', numeral: '#fde047', hole: '#020617', grass: '#c084fc' }),
+   132→
+   133→  /* ---------- AVATARS ---------- */
+   134→  avatar('avatar_golabi', 'COMMON', 140, 13131, ['#fb7185', '#881337', '#ffe4e6']), // pear blossom
+   135→  avatar('avatar_kepler', 'RARE', 600, 14141, ['#818cf8', '#312e81', '#e0e7ff']), // the astronomer
+   136→  avatar('avatar_neutron', 'EPIC', 1500, 15151, ['#22d3ee', '#164e63', '#cffafe']),
+   137→  avatar('avatar_galaxy', 'LEGENDARY', 3800, 16161, ['#a855f7', '#3b0764', '#f5d0fe']),
+   138→  avatar('avatar_simorgh', 'ULTIMATE', 7200, 17171, ['#f43f5e', '#4c0519', '#fde047']), // the mythical Simorgh
+   139→
+   140→  /* ---------- BACKGROUNDS ---------- */
+   141→  bg('bg_caravan', 'RARE', 720, 'dunes', ['#292524', '#44403c', '#57534e'], '#fbbf24'), // caravan night
+   142→  bg('bg_orbit', 'EPIC', 1600, 'stars', ['#082f49', '#0c4a6e', '#0c2340'], '#fbbf24'),
+   143→  bg('bg_synapse', 'EPIC', 1500, 'stars', ['#2e1065', '#4c1d95', '#1e1b4b'], '#22d3ee'),
+   144→  bg('bg_forge', 'EPIC', 1500, 'dunes', ['#450a0a', '#7c2d12', '#9a3412'], '#f97316'),
+   145→  bg('bg_eastern_dawn', 'ULTIMATE', 8000, 'velvet', ['#1a0505', '#3b0a0a', '#5c1010'], '#fbbf24'),
+   146→
+   147→  /* ---------- EFFECTS ---------- */
+   148→  fx('fx_supernova', 'LEGENDARY', 3400, ['#f97316', '#fde047', '#ef4444', '#fbbf24'], 'pixels'),
+   149→  fx('fx_warp', 'ULTIMATE', 7000, ['#f43f5e', '#22d3ee', '#fde047', '#c084fc'], 'phoenix'),
+   150→
+   151→  /* ---------- TITLES ---------- */
+   152→  title('title_navigator', 'RARE', 750, 4),
+   153→  title('title_mind', 'EPIC', 1900, 5),
+   154→  title('title_keeper', 'LEGENDARY', 4200, 9),
+   155→  title('title_supernova', 'ULTIMATE', 7500, 10),
+   156→  /* ---------- v0.2 unique drops ---------- */
+   157→  piece('piece_ivory', 'RARE', 560, ['#fde8c8', '#b98a4e', '#fff7ea'], ['#065f46', '#022c22', '#a7f3d0'], 61141),
+   158→  piece('piece_toormaloo', 'EPIC', 1650, ['#f43f5e', '#881337', '#fecdd3'], ['#2dd4bf', '#0f766e', '#ccfbf1'], 63123, '#f43f5e'),
+   159→  piece('piece_celestial', 'ULTIMATE', 6800, ['#fde68a', '#7c2d12', '#f0abfc'], ['#1e1b4b', '#312e81', '#c7d2fe'], 64001, '#fde68a'),
+   160→  board('board_orchard', 'RARE', 740, { frame: '#166534', frame2: '#052e16', cell: '#84cc16', cell2: '#65a30d', line: '#ecfccb', numeral: '#1a2e05', hole: '#f7fee7', grass: '#a3e635' }),
+   161→  board('board_lagoon', 'EPIC', 1550, { frame: '#0e7490', frame2: '#083344', cell: '#22d3ee', cell2: '#06b6d4', line: '#cffafe', numeral: '#083344', hole: '#ecfeff', grass: '#67e8f9' }),
+   162→  board('board_mirage', 'LEGENDARY', 2600, { frame: '#713f12', frame2: '#1c1917', cell: '#d97706', cell2: '#b45309', line: '#fef3c7', numeral: '#fffbeb', hole: '#fefce8', grass: '#f59e0b' }),
+   163→  avatar('avatar_bolbol', 'RARE', 560, 13131, ['#fb7185', '#881337', '#ffe4e6']),
+   164→  avatar('avatar_kavir', 'EPIC', 1420, 14141, ['#f59e0b', '#451a03', '#fef3c7']),
+   165→  avatar('avatar_pardis', 'LEGENDARY', 3400, 15151, ['#34d399', '#064e3b', '#fef9c3']),
+   166→  bg('bg_sahra', 'RARE', 800, 'dunes', ['#78350f', '#b45309', '#fbbf24'], '#fde68a'),
+   167→  bg('bg_mahtab', 'EPIC', 1500, 'stars', ['#1e1b4b', '#3730a3', '#c7d2fe'], '#a5b4fc'),
+   168→  bg('bg_shabestan', 'LEGENDARY', 2900, 'velvet', ['#0c0a1d', '#2e1065', '#7c3aed'], '#c4b5fd'),
+   169→  fx('fx_petals', 'EPIC', 1650, ['#fda4af', '#f472b6', '#fecdd3'], 'petals'),
+   170→  title('title_architect', 'RARE', 700, 5),
+   171→  title('title_logician', 'EPIC', 1600, 8),
+   172→  title('title_paradox', 'LEGENDARY', 3200, 12),
+   173→
+   174→];
+   175→
+   176→/* ================= ACHIEVEMENTS ================= */
+   177→export type AchEvent =
+   178→  | 'game_end' | 'move' | 'purchase' | 'quest' | 'level' | 'online';
+   179→
+   180→export interface AchievementDef {
+   181→  id: string;
+   182→  icon: string; // lucide icon name
+   183→  rarity: Rarity;
+   184→  goal: number;
+   185→  /** which counter to track */
+   186→  metric:
+   187→    | 'wins' | 'kindWins' | 'runWins' | 'games' | 'onlineWins' | 'onlineGames'
+   188→    | 'hardWins' | 'streakBest' | 'itemsOwned' | 'level' | 'questsDone' | 'draws'
+   189→    | 'arcadeGames' | 'boxOpens';
+   190→  coins: number; // reward coins on unlock
+   191→}
+   192→
+   193→export const ACHIEVEMENTS: AchievementDef[] = [
+   194→  { id: 'first_blood', icon: 'Sparkles', rarity: 'COMMON', goal: 1, metric: 'wins', coins: 50 },
+   195→  { id: 'kind_1', icon: 'Grid2x2', rarity: 'COMMON', goal: 1, metric: 'kindWins', coins: 60 },
+   196→  { id: 'run_1', icon: 'TrendingUp', rarity: 'COMMON', goal: 1, metric: 'runWins', coins: 60 },
+   197→  { id: 'games_10', icon: 'Gamepad2', rarity: 'COMMON', goal: 10, metric: 'games', coins: 80 },
+   198→  { id: 'online_1', icon: 'Globe', rarity: 'COMMON', goal: 1, metric: 'onlineWins', coins: 70 },
+   199→  { id: 'quests_5', icon: 'ScrollText', rarity: 'COMMON', goal: 5, metric: 'questsDone', coins: 90 },
+   200→  { id: 'draw_1', icon: 'Scale', rarity: 'COMMON', goal: 1, metric: 'draws', coins: 40 },
+   201→  { id: 'streak_3', icon: 'Flame', rarity: 'RARE', goal: 3, metric: 'streakBest', coins: 150 },
+   202→  { id: 'hard_1', icon: 'Skull', rarity: 'RARE', goal: 1, metric: 'hardWins', coins: 160 },
+   203→  { id: 'games_50', icon: 'Trophy', rarity: 'RARE', goal: 50, metric: 'games', coins: 200 },
+   204→  { id: 'collector', icon: 'ShoppingBag', rarity: 'RARE', goal: 5, metric: 'itemsOwned', coins: 180 },
+   205→  { id: 'online_10', icon: 'Wifi', rarity: 'RARE', goal: 10, metric: 'onlineWins', coins: 220 },
+   206→  { id: 'kind_5', icon: 'Layers', rarity: 'EPIC', goal: 5, metric: 'kindWins', coins: 350 },
+   207→  { id: 'run_5', icon: 'Rocket', rarity: 'EPIC', goal: 5, metric: 'runWins', coins: 350 },
+   208→  { id: 'streak_7', icon: 'Zap', rarity: 'EPIC', goal: 7, metric: 'streakBest', coins: 400 },
+   209→  { id: 'level_10', icon: 'Star', rarity: 'EPIC', goal: 10, metric: 'level', coins: 300 },
+   210→  { id: 'games_100', icon: 'Crown', rarity: 'LEGENDARY', goal: 100, metric: 'games', coins: 700 },
+   211→  { id: 'streak_15', icon: 'Meteor', rarity: 'LEGENDARY', goal: 15, metric: 'streakBest', coins: 900 },
+   212→  { id: 'level_20', icon: 'Gem', rarity: 'LEGENDARY', goal: 20, metric: 'level', coins: 1000 },
+   213→  /* v0.1.0-alpha: arcade + market */
+   214→  { id: 'arcade_1', icon: 'Rocket', rarity: 'COMMON', goal: 1, metric: 'arcadeGames', coins: 60 },
+   215→  { id: 'arcade_10', icon: 'Orbit', rarity: 'RARE', goal: 10, metric: 'arcadeGames', coins: 200 },
+   216→  { id: 'arcade_30', icon: 'BrainCircuit', rarity: 'EPIC', goal: 30, metric: 'arcadeGames', coins: 420 },
+   217→  { id: 'box_1', icon: 'PackageOpen', rarity: 'COMMON', goal: 1, metric: 'boxOpens', coins: 50 },
+   218→  { id: 'box_10', icon: 'Gift', rarity: 'RARE', goal: 10, metric: 'boxOpens', coins: 190 },
+   219→];
+   220→
+   221→/* ================= DAILY QUESTS ================= */
+   222→export interface QuestDef {
+   223→  id: string;
+   224→  metric: 'games' | 'wins' | 'kindWin' | 'runWin' | 'moves' | 'onlineGames' | 'pveWins' | 'hardWin' | 'drawGame' | 'localGames' | 'arcadeGames';
+   225→  goal: number;
+   226→  reward: number;
+   227→}
+   228→
+   229→export const QUEST_POOL: QuestDef[] = [
+   230→  { id: 'q_play3', metric: 'games', goal: 3, reward: 40 },
+   231→  { id: 'q_win2', metric: 'wins', goal: 2, reward: 70 },
+   232→  { id: 'q_kind', metric: 'kindWin', goal: 1, reward: 60 },
+   233→  { id: 'q_run', metric: 'runWin', goal: 1, reward: 80 },
+   234→  { id: 'q_moves25', metric: 'moves', goal: 25, reward: 35 },
+   235→  { id: 'q_online1', metric: 'onlineGames', goal: 1, reward: 45 },
+   236→  { id: 'q_pve1', metric: 'pveWins', goal: 1, reward: 50 },
+   237→  { id: 'q_win4', metric: 'wins', goal: 4, reward: 130 },
+   238→  { id: 'q_moves50', metric: 'moves', goal: 50, reward: 60 },
+   239→  { id: 'q_pve3', metric: 'pveWins', goal: 3, reward: 110 },
+   240→  { id: 'q_hard1', metric: 'hardWin', goal: 1, reward: 90 },
+   241→  { id: 'q_draw1', metric: 'drawGame', goal: 1, reward: 65 },
+   242→  { id: 'q_local2', metric: 'localGames', goal: 2, reward: 40 },
+   243→  { id: 'q_online2', metric: 'onlineGames', goal: 2, reward: 95 },
+   244→  /* v0.1.0-alpha: arcade quests */
+   245→  { id: 'q_arcade1', metric: 'arcadeGames', goal: 1, reward: 45 },
+   246→  { id: 'q_arcade3', metric: 'arcadeGames', goal: 3, reward: 105 },
+   247→];
+   248→
+   249→/** Deterministically pick 3 quests per user per day (seeded by dateKey+userId). */
+   250→export function questsForDay(dateKey: string, userId: string): QuestDef[] {
+   251→  let seed = 2166136261;
+   252→  const str = dateKey + '|' + userId;
+   253→  for (let i = 0; i < str.length; i++) {
+   254→    seed ^= str.charCodeAt(i);
+   255→    seed = Math.imul(seed, 16777619);
+   256→  }
+   257→  const rnd = (() => { let a = seed >>> 0; return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; })();
+   258→  const pool = [...QUEST_POOL];
+   259→  const picked: QuestDef[] = [];
+   260→  while (picked.length < 3 && pool.length) {
+   261→    picked.push(pool.splice(Math.floor(rnd() * pool.length), 1)[0]);
+   262→  }
+   263→  return picked;
+   264→}
+   265→
+   266→/* ================= ECONOMY ================= */
+   267→export function xpForLevel(level: number): number {
+   268→  // XP needed to advance FROM `level` to level+1
+   269→  return 100 + (level - 1) * 60;
+   270→}
+   271→
+   272→export function levelFromXp(xp: number): { level: number; into: number; need: number } {
+   273→  let level = 1;
+   274→  let remaining = xp;
+   275→  while (remaining >= xpForLevel(level) && level < 99) {
+   276→    remaining -= xpForLevel(level);
+   277→    level++;
+   278→  }
+   279→  return { level, into: remaining, need: xpForLevel(level) };
+   280→}
+   281→
+   282→export interface RewardInput {
+   283→  mode: 'PVE' | 'LOCAL_PVP' | 'ONLINE';
+   284→  outcome: 'WIN' | 'LOSS' | 'DRAW';
+   285→  aiLevel?: 'EASY' | 'MEDIUM' | 'HARD';
+   286→  ranked?: boolean;
+   287→  moves: number;
+   288→  streak: number; // current streak BEFORE this game (for win bonus)
+   289→}
+   290→
+   291→export function computeRewards(r: RewardInput): { coins: number; xp: number } {
+   292→  let coins = 0;
+   293→  let xp = 0;
+   294→  if (r.mode === 'ONLINE') {
+   295→    if (r.outcome === 'WIN') { coins = 60 + Math.min(r.streak, 5) * 6; xp = 80; }
+   296→    else if (r.outcome === 'DRAW') { coins = 28; xp = 40; }
+   297→    else { coins = 12; xp = 20; }
+   298→  } else if (r.mode === 'PVE') {
+   299→    const base = r.aiLevel === 'HARD' ? 45 : r.aiLevel === 'MEDIUM' ? 22 : 8;
+   300→    if (r.outcome === 'WIN') { coins = base; xp = 30 + (r.aiLevel === 'HARD' ? 30 : r.aiLevel === 'MEDIUM' ? 12 : 0); }
+   301→    else if (r.outcome === 'DRAW') { coins = Math.ceil(base / 3); xp = 15; }
+   302→    else { coins = Math.ceil(base / 5); xp = 8; }
+   303→  } else { // LOCAL_PVP — fun + XP only (anti-farm: near-zero coins)
+   304→    coins = 4; xp = 25;
+   305→  }
+   306→  return { coins, xp };
+   307→}
+   308→
+   309→/** ELO with K=32; returns deltas from p1 perspective */
+   310→export function eloDeltas(r1: number, r2: number, p1Score: 0 | 0.5 | 1, k = 32): [number, number] {
+   311→  const exp = 1 / (1 + Math.pow(10, (r2 - r1) / 400));
+   312→  const d = Math.round(k * (p1Score - exp));
+   313→  return [d, -d];
+   314→}
+   315→
+   316→/* ================= v0.1.0-alpha: LOOT BOXES ================= */
+   317→export type DropKind = 'COINS' | 'XP' | 'ITEM';
+   318→export interface DropDef { kind: DropKind; itemCode?: string; amount: number; weight: number; }
+   319→export interface LootBoxDefT { code: string; rarity: Rarity; price: number; image: string; drops: DropDef[]; }
+   320→
+   321→/** Source of truth for the five chests — synced to DB by src/scripts/sync-items.ts */
+   322→export const LOOT_BOXES: LootBoxDefT[] = [
+   323→  {
+   324→    code: 'box_common', rarity: 'COMMON', price: 300, image: '/art/box-common.png',
+   325→    drops: [
+   326→      { kind: 'COINS', amount: 80, weight: 30 },
+   327→      { kind: 'COINS', amount: 150, weight: 22 },
+   328→      { kind: 'COINS', amount: 260, weight: 10 },
+   329→      { kind: 'XP', amount: 60, weight: 14 },
+   330→      { kind: 'XP', amount: 120, weight: 6 },
+   331→      { kind: 'ITEM', itemCode: 'piece_gol', amount: 0, weight: 4 },
+   332→      { kind: 'ITEM', itemCode: 'avatar_golabi', amount: 0, weight: 4 },
+   333→      { kind: 'ITEM', itemCode: 'bg_caravan', amount: 0, weight: 4 },
+   334→      { kind: 'ITEM', itemCode: 'piece_zafran', amount: 0, weight: 4 },
+   335→      { kind: 'ITEM', itemCode: 'board_mosaic', amount: 0, weight: 2 },
+   336→    ],
+   337→  },
+   338→  {
+   339→    code: 'box_rare', rarity: 'RARE', price: 800, image: '/art/box-rare.png',
+   340→    drops: [
+   341→      { kind: 'COINS', amount: 200, weight: 24 },
+   342→      { kind: 'COINS', amount: 420, weight: 14 },
+   343→      { kind: 'COINS', amount: 700, weight: 6 },
+   344→      { kind: 'XP', amount: 150, weight: 14 },
+   345→      { kind: 'XP', amount: 300, weight: 6 },
+   346→      { kind: 'ITEM', itemCode: 'piece_zafran', amount: 0, weight: 6 },
+   347→      { kind: 'ITEM', itemCode: 'board_mosaic', amount: 0, weight: 5 },
+   348→      { kind: 'ITEM', itemCode: 'avatar_kepler', amount: 0, weight: 5 },
+   349→      { kind: 'ITEM', itemCode: 'title_navigator', amount: 0, weight: 4 },
+   350→      { kind: 'ITEM', itemCode: 'piece_lapis', amount: 0, weight: 3 },
+   351→      { kind: 'ITEM', itemCode: 'fx_supernova', amount: 0, weight: 1 },
+   352→    ],
+   353→  },
+   354→  {
+   355→    code: 'box_epic', rarity: 'EPIC', price: 1800, image: '/art/box-epic.png',
+   356→    drops: [
+   357→      { kind: 'COINS', amount: 500, weight: 22 },
+   358→      { kind: 'COINS', amount: 1000, weight: 10 },
+   359→      { kind: 'XP', amount: 350, weight: 14 },
+   360→      { kind: 'ITEM', itemCode: 'piece_lapis', amount: 0, weight: 8 },
+   361→      { kind: 'ITEM', itemCode: 'piece_orbit', amount: 0, weight: 7 },
+   362→      { kind: 'ITEM', itemCode: 'avatar_neutron', amount: 0, weight: 7 },
+   363→      { kind: 'ITEM', itemCode: 'bg_synapse', amount: 0, weight: 6 },
+   364→      { kind: 'ITEM', itemCode: 'board_bazaar', amount: 0, weight: 6 },
+   365→      { kind: 'ITEM', itemCode: 'title_mind', amount: 0, weight: 4 },
+   366→      { kind: 'ITEM', itemCode: 'piece_perspolis', amount: 0, weight: 3 },
+   367→      { kind: 'ITEM', itemCode: 'fx_supernova', amount: 0, weight: 2 },
+   368→    ],
+   369→  },
+   370→  {
+   371→    code: 'box_legendary', rarity: 'LEGENDARY', price: 3600, image: '/art/box-legendary.png',
+   372→    drops: [
+   373→      { kind: 'COINS', amount: 1200, weight: 20 },
+   374→      { kind: 'COINS', amount: 2200, weight: 8 },
+   375→      { kind: 'XP', amount: 700, weight: 12 },
+   376→      { kind: 'ITEM', itemCode: 'piece_perspolis', amount: 0, weight: 9 },
+   377→      { kind: 'ITEM', itemCode: 'avatar_galaxy', amount: 0, weight: 9 },
+   378→      { kind: 'ITEM', itemCode: 'bg_forge', amount: 0, weight: 7 },
+   379→      { kind: 'ITEM', itemCode: 'title_keeper', amount: 0, weight: 5 },
+   380→      { kind: 'ITEM', itemCode: 'fx_supernova', amount: 0, weight: 6 },
+   381→      { kind: 'ITEM', itemCode: 'piece_quasar', amount: 0, weight: 2 },
+   382→      { kind: 'ITEM', itemCode: 'fx_warp', amount: 0, weight: 1 },
+   383→    ],
+   384→  },
+   385→  {
+   386→    code: 'box_ultimate', rarity: 'ULTIMATE', price: 7200, image: '/art/box-ultimate.png',
+   387→    drops: [
+   388→      { kind: 'COINS', amount: 3000, weight: 18 },
+   389→      { kind: 'COINS', amount: 5500, weight: 7 },
+   390→      { kind: 'XP', amount: 1500, weight: 10 },
+   391→      { kind: 'ITEM', itemCode: 'piece_quasar', amount: 0, weight: 10 },
+   392→      { kind: 'ITEM', itemCode: 'avatar_simorgh', amount: 0, weight: 10 },
+   393→      { kind: 'ITEM', itemCode: 'bg_eastern_dawn', amount: 0, weight: 9 },
+   394→      { kind: 'ITEM', itemCode: 'board_nebula', amount: 0, weight: 9 },
+   395→      { kind: 'ITEM', itemCode: 'fx_warp', amount: 0, weight: 6 },
+   396→      { kind: 'ITEM', itemCode: 'title_supernova', amount: 0, weight: 6 },
+   397→    ],
+   398→  },
+   399→
+   400→];
+   401→
+   402→/** Weighted random pick (server-side). Returns the winning drop. */
+   403→export function rollDrop(drops: DropDef[], rnd: () => number = Math.random): DropDef {
+   404→  const total = drops.reduce((s, d) => s + d.weight, 0);
+   405→  let r = rnd() * total;
+   406→  for (const d of drops) {
+   407→    r -= d.weight;
+   408→    if (r <= 0) return d;
+   409→  }
+   410→  return drops[drops.length - 1];
+   411→}
+   412→
+   413→/* ================= v0.1.0-alpha: ARCADE ECONOMY ================= */
+   414→export type ArcadeGame = 'orbit' | 'synapse' | 'stellar' | 'mazemind' | 'boulderyard' | 'boulderyard2';
+   415→export const ARCADE_GAMES: ArcadeGame[] = ['orbit', 'synapse', 'stellar', 'mazemind', 'boulderyard', 'boulderyard2'];
+   416→
+   417→/** Per-game hourly coin caps (anti-farm, mirrors duel CAPS). */
+   418→export const ARCADE_CAPS: Record<ArcadeGame, number> = { orbit: 260, synapse: 220, stellar: 240, mazemind: 300, boulderyard: 260, boulderyard2: 280 };
+   419→
+   420→/**
+   421→ * Score -> rewards. Score scales differ per game; each formula is tuned so a
+   422→ * solid mid-tier run ≈ a duel win. Server clamps by hourly cap.
+   423→ */
+   424→export function arcadeRewards(game: ArcadeGame, score: number): { coins: number; xp: number } {
+   425→  if (!Number.isFinite(score) || score <= 0) return { coins: 3, xp: 6 };
+   426→  const s = Math.floor(score);
+   427→  if (game === 'orbit') {
+   428→    // perfect mission ≈ 1000; typical early mission ≈ 300
+   429→    const coins = Math.min(90, 12 + Math.floor(s / 12));
+   430→    const xp = Math.min(120, 20 + Math.floor(s / 9));
+   431→    return { coins, xp };
+   432→  }
+   433→  if (game === 'synapse') {
+   434→    // session score ≈ trials × accuracy × n
+   435→    const coins = Math.min(80, 10 + Math.floor(s / 14));
+   436→    const xp = Math.min(110, 18 + Math.floor(s / 10));
+   437→    return { coins, xp };
+   438→  }
+   439→  // stellar: mass units forged; a full supernova run ≈ 2000+
+   440→  const coins = Math.min(85, 10 + Math.floor(s / 24));
+   441→  const xp = Math.min(115, 16 + Math.floor(s / 18));
+   442→  return { coins, xp };
+   443→}
+   444→
+   445→/** v0.2 reward curves for the three new arcade games (mind-tank wave scores,
+   446→ *  boulder yard level scores). Same tuning goal: solid run ≈ a duel win. */
+   447→export function arcadeRewardsV2(game: 'mazemind' | 'boulderyard' | 'boulderyard2', score: number): { coins: number; xp: number } {
+   448→  if (!Number.isFinite(score) || score <= 0) return { coins: 3, xp: 6 };
+   449→  const s = Math.floor(score);
+   450→  if (game === 'mazemind') {
+   451→    // a full 10-robot run ≈ 3200; casual early death ≈ 500
+   452→    const coins = Math.min(100, 12 + Math.floor(s / 26));
+   453→    const xp = Math.min(130, 16 + Math.floor(s / 20));
+   454→    return { coins, xp };
+   455→  }
+   456→  if (game === 'boulderyard') {
+   457→    // solving ~6 levels ≈ 1400
+   458→    const coins = Math.min(90, 10 + Math.floor(s / 18));
+   459→    const xp = Math.min(110, 14 + Math.floor(s / 15));
+   460→    return { coins, xp };
+   461→  }
+   462→  // boulderyard2: trickier mechanics, slightly richer
+   463→  const coins = Math.min(95, 10 + Math.floor(s / 17));
+   464→  const xp = Math.min(120, 14 + Math.floor(s / 14));
+   465→  return { coins, xp };
+   466→}
+   467→
+   468→/** Sanity ceiling for client-reported scores (anything above is suspect → clamped). */
+   469→export const ARCADE_SCORE_CEIL: Record<ArcadeGame, number> = { orbit: 1400, synapse: 1200, stellar: 4000, mazemind: 6000, boulderyard: 5000, boulderyard2: 6000 };
+   470→
+   471→
+   472→/* ================= v0.2: EMOTE PACKS ================= */
+   473→/** id → emoji across ALL packs (receivers resolve any incoming emote id). */
+   474→export const ALL_EMOTES: Record<string, string> = Object.fromEntries(
+   475→  STORE_ITEMS.filter((i) => i.category === 'EMOTE').flatMap((i) => {
+   476→    const emotes = (i.data as { emotes?: { id: string; emoji: string }[] }).emotes ?? [];
+   477→    return emotes.map((e) => [e.id, e.emoji]);
+   478→  }),
+   479→);
+   480→
+   481→/** The five emotes of a pack (falls back to classic). */
+   482→export function emotePackList(code: string | undefined): { id: string; emoji: string }[] {
+   483→  const item = STORE_ITEMS.find((i) => i.code === (code ?? 'emote_classic') && i.category === 'EMOTE');
+   484→  const list = item ? (item.data as { emotes: { id: string; emoji: string }[] }).emotes : [];
+   485→  const fallback = STORE_ITEMS.find((i) => i.code === 'emote_classic');
+   486→  return list.length > 0 ? list : ((fallback?.data as { emotes: { id: string; emoji: string }[] }).emotes ?? []);
+   487→}
+   488→

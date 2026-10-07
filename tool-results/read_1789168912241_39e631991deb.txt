@@ -1,0 +1,719 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * ProfileView — identity card (avatar, title, XP/level, rating, coins),
+     5→ * stats grid, bio editor, showcase picker (max 3 achievements), achievements
+     6→ * grid with progress, match history and settings (sound/language) + a
+     7→ * collapsible player-report form.
+     8→ */
+     9→import { useEffect, useState } from 'react';
+    10→import { ResponsiveContainer, LineChart, Line, YAxis, Tooltip } from 'recharts';
+    11→import { useApp } from '@/store/app';
+    12→import { api, type SafeUserDTO } from '@/lib/api';
+    13→import { localizeDigits, type Locale, type TKey } from '@/lib/i18n';
+    14→import { LOCALES, LOCALE_META, levelFromXpT } from '@/components/shared/shell-helpers';
+    15→import { AvatarBubble } from '@/components/shared/PixelSprite';
+    16→import { RARITY_META, ACHIEVEMENTS, type Rarity } from '@/lib/game/content';
+    17→import { setSoundEnabled, sfx } from '@/lib/sound';
+    18→import { toast } from 'sonner';
+    19→import { Badge } from '@/components/ui/badge';
+    20→import { Button } from '@/components/ui/button';
+    21→import { Checkbox } from '@/components/ui/checkbox';
+    22→import { Input } from '@/components/ui/input';
+    23→import { Label } from '@/components/ui/label';
+    24→import { Progress } from '@/components/ui/progress';
+    25→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    26→import { Skeleton } from '@/components/ui/skeleton';
+    27→import { Switch } from '@/components/ui/switch';
+    28→import { Textarea } from '@/components/ui/textarea';
+    29→import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+    30→import { cn } from '@/lib/utils';
+    31→import {
+    32→  Flag,
+    33→  Gamepad2,
+    34→  Gem,
+    35→  Globe,
+    36→  Grid2x2,
+    37→  Layers,
+    38→  LogIn,
+    39→  Medal,
+    40→  MessageSquareText,
+    41→  Percent,
+    42→  Rocket,
+    43→  Save,
+    44→  Scale,
+    45→  ScrollText,
+    46→  Settings2,
+    47→  ShoppingBag,
+    48→  Skull,
+    49→  Sparkles,
+    50→  Star,
+    51→  Swords,
+    52→  TrendingUp,
+    53→  Trophy,
+    54→  Volume2,
+    55→  Wifi,
+    56→  XCircle,
+    57→  Zap,
+    58→  Crown,
+    59→  Flame,
+    60→  ChevronDown,
+    61→  type LucideIcon,
+    62→} from 'lucide-react';
+    63→
+    64→/* ================= types & helpers ================= */
+    65→
+    66→interface AchDTO {
+    67→  id: string;
+    68→  icon: string;
+    69→  rarity: Rarity;
+    70→  goal: number;
+    71→  coins: number;
+    72→  progress: number;
+    73→  unlockedAt: string | null;
+    74→}
+    75→
+    76→interface GameRow {
+    77→  id: string;
+    78→  mode: string;
+    79→  endReason: string;
+    80→  moves: number;
+    81→  p1Name: string;
+    82→  p2Name: string;
+    83→  youWon: boolean;
+    84→  draw: boolean;
+    85→  p1RatingDelta: number;
+    86→  p2RatingDelta: number;
+    87→  createdAt: string;
+    88→}
+    89→
+    90→/** lucide icon lookup for achievement defs (Meteor missing in this build → Sparkles) */
+    91→const ACH_ICONS: Record<string, LucideIcon> = {
+    92→  Sparkles,
+    93→  Grid2x2,
+    94→  TrendingUp,
+    95→  Gamepad2,
+    96→  Globe,
+    97→  ScrollText,
+    98→  Scale,
+    99→  Flame,
+   100→  Skull,
+   101→  Trophy,
+   102→  ShoppingBag,
+   103→  Wifi,
+   104→  Layers,
+   105→  Rocket,
+   106→  Zap,
+   107→  Star,
+   108→  Crown,
+   109→  Gem,
+   110→  Meteor: Sparkles,
+   111→};
+   112→
+   113→const REASONS = ['INSULT', 'CHEAT', 'SPAM', 'NAME', 'OTHER'] as const;
+   114→
+   115→/** 'first_blood' → 'First blood' (fallback for titles) */
+   116→function prettyName(code: string): string {
+   117→  const s = code.split('_').slice(1).join(' ').trim();
+   118→  return s ? s.charAt(0).toUpperCase() + s.slice(1) : code;
+   119→}
+   120→
+   121→/** Localized achievement label built from its metric + goal (readable in all 4 locales). */
+   122→function achLabel(a: { id: string; metric: string; goal: number }, t: (k: TKey) => string): string {
+   123→  const g = a.goal;
+   124→  switch (a.metric) {
+   125→    case 'wins': return `${g} × ${t('wins')}`;
+   126→    case 'kindWins': return `${g > 1 ? `${g} × ` : ''}${t('quest_q_kind')}`;
+   127→    case 'runWins': return `${g > 1 ? `${g} × ` : ''}${t('quest_q_run')}`;
+   128→    case 'games': return `${g} × ${t('games_played')}`;
+   129→    case 'onlineWins': return `${g} × ${t('online')}`;
+   130→    case 'onlineGames': return `${g} × ${t('online')}`;
+   131→    case 'hardWins': return `${g} × AI ${t('ai_hard')}`;
+   132→    case 'streakBest': return `${g} × ${t('streak')}`;
+   133→    case 'itemsOwned': return `${g} × 🛍`;
+   134→    case 'level': return `${t('level')} ${g}`;
+   135→    case 'questsDone': return `${g} × ${t('daily_quests')}`;
+   136→    case 'draws': return `${g} × ${t('draws_stat')}`;
+   137→    default: return prettyName(a.id);
+   138→  }
+   139→}
+   140→
+   141→/** Resolve an achievement id to its catalog def → localized label. */
+   142→function achLabelById(id: string, t: (k: TKey) => string): string {
+   143→  const def = ACHIEVEMENTS.find((x) => x.id === id);
+   144→  return def ? achLabel(def, t) : prettyName(id);
+   145→}
+   146→
+   147→function fmtDate(iso: string, locale: Locale): string {
+   148→  try {
+   149→    return new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(iso));
+   150→  } catch {
+   151→    return iso.slice(0, 10);
+   152→  }
+   153→}
+   154→
+   155→function timeAgo(iso: string, locale: Locale): string {
+   156→  try {
+   157→    const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+   158→    const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+   159→    if (s < 60) return rtf.format(-Math.max(s, 1), 'second');
+   160→    const m = Math.round(s / 60);
+   161→    if (m < 60) return rtf.format(-m, 'minute');
+   162→    const h = Math.round(m / 60);
+   163→    if (h < 24) return rtf.format(-h, 'hour');
+   164→    return rtf.format(-Math.round(h / 24), 'day');
+   165→  } catch {
+   166→    return '';
+   167→  }
+   168→}
+   169→
+   170→function AchIcon({ name, className }: { name: string; className?: string }) {
+   171→  const Icon = ACH_ICONS[name] ?? Sparkles;
+   172→  return <Icon className={className} />;
+   173→}
+   174→
+   175→/* ================= view ================= */
+   176→
+   177→export function ProfileView() {
+   178→  const { user, t, locale, patchUser, setLocale } = useApp();
+   179→  const uid = user?.id;
+   180→
+   181→  const [achs, setAchs] = useState<AchDTO[] | null>(null);
+   182→  const [games, setGames] = useState<GameRow[] | null>(null);
+   183→  const [bio, setBio] = useState('');
+   184→  const [bioBusy, setBioBusy] = useState(false);
+   185→  const [showcase, setShowcase] = useState<string[]>([]);
+   186→  const [repOpen, setRepOpen] = useState(false);
+   187→  const [repTarget, setRepTarget] = useState('');
+   188→  const [repReason, setRepReason] = useState<(typeof REASONS)[number]>('INSULT');
+   189→  const [repDetails, setRepDetails] = useState('');
+   190→  const [repBusy, setRepBusy] = useState(false);
+   191→
+   192→  /* ---------- data ---------- */
+   193→  useEffect(() => {
+   194→    if (!uid) {
+   195→      setAchs(null);
+   196→      setGames(null);
+   197→      return;
+   198→    }
+   199→    let live = true;
+   200→    api
+   201→      .get<{ achievements: AchDTO[] }>('/api/achievements')
+   202→      .then((d) => live && setAchs(d.achievements))
+   203→      .catch(() => live && setAchs([]));
+   204→    api
+   205→      .get<{ games: GameRow[] }>('/api/game/history')
+   206→      .then((d) => live && setGames(d.games))
+   207→      .catch(() => live && setGames([]));
+   208→    return () => {
+   209→      live = false;
+   210→    };
+   211→  }, [uid]);
+   212→
+   213→  useEffect(() => {
+   214→    if (user) {
+   215→      setBio(user.bio ?? '');
+   216→      setShowcase(user.showcase ?? []);
+   217→    }
+   218→  }, [uid]);
+   219→
+   220→  /* ---------- guards ---------- */
+   221→  if (!user) {
+   222→    return (
+   223→      <div className="mx-auto w-full max-w-4xl px-4">
+   224→        <section className="royal-card mt-8 rounded-3xl p-10 text-center">
+   225→          <div className="text-5xl" aria-hidden>
+   226→            👤
+   227→          </div>
+   228→          <h1 className="mt-3 text-xl font-black gold-text">{t('profile_title')}</h1>
+   229→          <p className="mt-2 text-sm text-muted-foreground">{t('auth_no')}</p>
+   230→          <p className="mt-4 inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-400/10 px-4 py-1.5 text-sm font-black text-amber-400">
+   231→            <LogIn className="h-4 w-4" /> {t('login')} →
+   232→          </p>
+   233→        </section>
+   234→      </div>
+   235→    );
+   236→  }
+   237→
+   238→  const lvl = levelFromXpT(user.xp);
+   239→  const winRate = user.gamesPlayed > 0 ? Math.round((user.wins / user.gamesPlayed) * 100) : 0;
+   240→  const unlocked = (achs ?? []).filter((a) => !!a.unlockedAt);
+   241→
+   242→  /* ---------- actions ---------- */
+   243→  const saveBio = async () => {
+   244→    setBioBusy(true);
+   245→    try {
+   246→      const res = await api.patch<{ ok: boolean; user: SafeUserDTO }>('/api/profile', { bio: bio.trim() });
+   247→      patchUser(res.user);
+   248→      sfx.click();
+   249→      toast.success(t('success'));
+   250→    } catch (e) {
+   251→      if ((e as Error).message === 'BAD_BIO') toast.error(t('bio_bad'));
+   252→      else toast.error(t('error'));
+   253→    } finally {
+   254→      setBioBusy(false);
+   255→    }
+   256→  };
+   257→
+   258→  const toggleShowcase = async (id: string, checked: boolean) => {
+   259→    const prev = showcase;
+   260→    const next = checked ? [...prev, id] : prev.filter((x) => x !== id);
+   261→    if (next.length > 3) {
+   262→      toast(t('showcase_hint'));
+   263→      return;
+   264→    }
+   265→    setShowcase(next);
+   266→    try {
+   267→      const res = await api.patch<{ ok: boolean; user: SafeUserDTO }>('/api/profile', { showcase: next });
+   268→      patchUser(res.user);
+   269→      sfx.click();
+   270→    } catch {
+   271→      setShowcase(prev);
+   272→      toast.error(t('error'));
+   273→    }
+   274→  };
+   275→
+   276→  const sendReport = async () => {
+   277→    if (!repTarget.trim()) return;
+   278→    setRepBusy(true);
+   279→    try {
+   280→      await api.post('/api/reports', { targetName: repTarget.trim(), reason: repReason, details: repDetails.trim() });
+   281→      toast.success(t('report_sent'));
+   282→      setRepTarget('');
+   283→      setRepDetails('');
+   284→      setRepReason('INSULT');
+   285→      setRepOpen(false);
+   286→    } catch {
+   287→      toast.error(t('error'));
+   288→    } finally {
+   289→      setRepBusy(false);
+   290→    }
+   291→  };
+   292→
+   293→  /* ---------- derived labels ---------- */
+   294→  const endLabel = (e: string): string =>
+   295→    e === 'KIND' ? t('win_kind') : e === 'RUN' ? t('win_run') : e === 'FULL' ? t('draw_full') : e === 'RESIGN' ? t('resign') : e === 'TIMEOUT' ? t('timeout_win') : '';
+   296→
+   297→  const modeBadge = (m: string): { label: string; cls: string } =>
+   298→    m === 'PVE'
+   299→      ? { label: t('mode_ai'), cls: 'border-sky-500/40 bg-sky-500/10 text-sky-300' }
+   300→      : m === 'ONLINE'
+   301→        ? { label: t('online'), cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' }
+   302→        : { label: t('mode_local'), cls: 'border-violet-500/40 bg-violet-500/10 text-violet-300' };
+   303→
+   304→  const opponentOf = (g: GameRow): string => {
+   305→    const mine = user.username.toLowerCase();
+   306→    return g.p1Name && g.p1Name.toLowerCase() === mine ? g.p2Name || '—' : g.p1Name || '—';
+   307→  };
+   308→
+   309→  /* rating history reconstructed from ELO deltas, anchored at the true current rating
+   310→     (plain derivation — ProfileView has an early guest return, so no hooks below it) */
+   311→  const ratingSeries = (() => {
+   312→    if (!games || !user) return [] as number[];
+   313→    const myDelta = (g: GameRow) =>
+   314→      g.p1Name && g.p1Name.toLowerCase() === user.username.toLowerCase() ? g.p1RatingDelta : g.p2RatingDelta;
+   315→    const asc = [...games].reverse();
+   316→    const total = asc.reduce((a, g) => a + myDelta(g), 0);
+   317→    let acc = user.rating - total;
+   318→    const out = [acc];
+   319→    for (const g of asc) { acc += myDelta(g); out.push(acc); }
+   320→    return out;
+   321→  })();
+   322→  const ratingData = ratingSeries.map((v, i) => ({ i, v }));
+   323→  const rMin = ratingSeries.length ? Math.min(...ratingSeries) : 0;
+   324→  const rMax = ratingSeries.length ? Math.max(...ratingSeries) : 0;
+   325→
+   326→  const stats: { icon: LucideIcon; label: string; value: string; cls: string }[] = [
+   327→    { icon: Trophy, label: t('wins'), value: localizeDigits(user.wins, locale), cls: 'text-emerald-400 bg-emerald-500/10' },
+   328→    { icon: XCircle, label: t('losses'), value: localizeDigits(user.losses, locale), cls: 'text-rose-400 bg-rose-500/10' },
+   329→    { icon: Scale, label: t('draws_stat'), value: localizeDigits(user.draws, locale), cls: 'text-sky-400 bg-sky-500/10' },
+   330→    { icon: Gamepad2, label: t('games_played'), value: localizeDigits(user.gamesPlayed, locale), cls: 'text-fuchsia-400 bg-fuchsia-500/10' },
+   331→    { icon: Flame, label: t('best_streak'), value: localizeDigits(user.bestStreak, locale), cls: 'text-amber-400 bg-amber-500/10' },
+   332→    { icon: Percent, label: t('win_rate'), value: `${localizeDigits(winRate, locale)}%`, cls: 'text-violet-300 bg-violet-500/10' },
+   333→  ];
+   334→
+   335→  return (
+   336→    <div className="mx-auto w-full max-w-4xl space-y-4 px-4 pb-10 pt-4">
+   337→      {/* ---------- header card ---------- */}
+   338→      <section className="royal-card relative overflow-hidden rounded-3xl p-5 sm:p-6">
+   339→        <div className="pointer-events-none absolute inset-0 shimmer" aria-hidden />
+   340→        <div className="flex flex-wrap items-center gap-4">
+   341→          <AvatarBubble code={user.avatarItem} size={72} glow />
+   342→          <div className="min-w-0 flex-1">
+   343→            <div className="flex flex-wrap items-center gap-2">
+   344→              <h1 className="text-xl font-black sm:text-2xl">{user.username}</h1>
+   345→              {user.titleItem && (
+   346→                <Badge variant="outline" className="border-amber-400/40 bg-amber-400/10 text-[10px] font-black text-amber-300">
+   347→                  👑 {prettyName(user.titleItem)}
+   348→                </Badge>
+   349→              )}
+   350→              {user.isGuest && (
+   351→                <Badge variant="outline" className="text-[10px] font-black text-muted-foreground">
+   352→                  {t('guest')}
+   353→                </Badge>
+   354→              )}
+   355→            </div>
+   356→            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+   357→              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-black text-emerald-400">
+   358→                ⭐ {t('level')} {localizeDigits(lvl.level, locale)}
+   359→              </span>
+   360→              <span className="font-black text-amber-400">
+   361→                🪙 {localizeDigits(user.coins, locale)} {t('coins')}
+   362→              </span>
+   363→              <span className="font-bold">
+   364→                🎯 {t('rating')}: {localizeDigits(user.rating, locale)}
+   365→              </span>
+   366→              <span>
+   367→                📅 {t('member_since')} {fmtDate(user.createdAt, locale)}
+   368→              </span>
+   369→            </div>
+   370→            <div className="mt-2.5 flex items-center gap-2">
+   371→              <Progress value={(lvl.into / lvl.need) * 100} className="h-2 flex-1" aria-label={t('xp')} />
+   372→              <span className="shrink-0 text-[10px] font-bold text-muted-foreground">
+   373→                {localizeDigits(lvl.into, locale)} / {localizeDigits(lvl.need, locale)} {t('xp')}
+   374→              </span>
+   375→            </div>
+   376→          </div>
+   377→        </div>
+   378→      </section>
+   379→
+   380→      {/* ---------- stats grid ---------- */}
+   381→      <section>
+   382→        <h2 className="mb-2 flex items-center gap-2 text-base font-black">
+   383→          <Star className="h-4 w-4 text-amber-400" /> {t('stats')}
+   384→        </h2>
+   385→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+   386→          {stats.map((s) => (
+   387→            <div key={s.label} className="royal-card flex items-center gap-3 rounded-2xl p-3 transition-all hover:scale-[1.02]">
+   388→              <span className={cn('grid h-10 w-10 shrink-0 place-items-center rounded-xl', s.cls)}>
+   389→                <s.icon className="h-5 w-5" />
+   390→              </span>
+   391→              <div className="min-w-0">
+   392→                <div className="text-lg font-black leading-none">{s.value}</div>
+   393→                <div className="mt-1 truncate text-[10px] font-bold text-muted-foreground">{s.label}</div>
+   394→              </div>
+   395→            </div>
+   396→          ))}
+   397→        </div>
+   398→      </section>
+   399→
+   400→      {/* ---------- rating trend sparkline ---------- */}
+   401→      {ratingSeries.length >= 2 && (
+   402→        <section className="royal-card rounded-2xl p-4">
+   403→          <div className="mb-2 flex items-center justify-between">
+   404→            <h3 className="flex items-center gap-2 text-sm font-black">
+   405→              <TrendingUp className="h-4 w-4 text-amber-400" /> {t('rating_trend')}
+   406→            </h3>
+   407→            <span className="text-xs font-black text-amber-400">
+   408→              🎯 {localizeDigits(user.rating, locale)}
+   409→              {ratingSeries[ratingSeries.length - 1] >= ratingSeries[0] ? ' ↗' : ' ↘'}
+   410→            </span>
+   411→          </div>
+   412→          <div className="h-20" dir="ltr">
+   413→            <ResponsiveContainer width="100%" height="100%">
+   414→              <LineChart data={ratingData} margin={{ top: 6, right: 4, bottom: 2, left: 4 }}>
+   415→                <YAxis domain={[rMin - 6, rMax + 6]} hide />
+   416→                <Tooltip
+   417→                  cursor={{ stroke: 'rgba(251,191,36,0.35)', strokeWidth: 1 }}
+   418→                  contentStyle={{ background: 'rgba(15,10,30,0.92)', border: '1px solid rgba(251,191,36,0.35)', borderRadius: 10, fontSize: 11 }}
+   419→                  labelFormatter={() => ''}
+   420→                  formatter={(v: number | string) => [localizeDigits(Number(v), locale), t('rating')]}
+   421→                />
+   422→                <Line type="monotone" dataKey="v" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
+   423→              </LineChart>
+   424→            </ResponsiveContainer>
+   425→          </div>
+   426→          <div className="mt-1 flex justify-between text-[10px] font-bold text-muted-foreground" dir="ltr">
+   427→            <span>{localizeDigits(rMin, locale)}</span>
+   428→            <span>{localizeDigits(rMax, locale)}</span>
+   429→          </div>
+   430→        </section>
+   431→      )}
+   432→
+   433→      {/* ---------- bio + showcase ---------- */}
+   434→      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+   435→        <section className="royal-card rounded-2xl p-4">
+   436→          <h3 className="flex items-center gap-2 text-sm font-black">
+   437→            <MessageSquareText className="h-4 w-4 text-fuchsia-400" /> {t('bio')}
+   438→          </h3>
+   439→          <Input
+   440→            className="mt-3"
+   441→            value={bio}
+   442→            maxLength={140}
+   443→            placeholder={t('bio_hint')}
+   444→            onChange={(e) => setBio(e.target.value)}
+   445→          />
+   446→          <div className="mt-2 flex items-center justify-between">
+   447→            <span className={cn('text-[10px] font-bold', bio.length >= 140 ? 'text-rose-400' : 'text-muted-foreground')}>
+   448→              {localizeDigits(bio.length, locale)} / {localizeDigits(140, locale)}
+   449→            </span>
+   450→            <Button
+   451→              size="sm"
+   452→              className="glow-gold"
+   453→              disabled={bioBusy || bio.trim() === (user.bio ?? '')}
+   454→              onClick={() => void saveBio()}
+   455→            >
+   456→              <Save className="h-4 w-4" /> {t('save_bio')}
+   457→            </Button>
+   458→          </div>
+   459→        </section>
+   460→
+   461→        <section className="royal-card rounded-2xl p-4">
+   462→          <h3 className="flex items-center gap-2 text-sm font-black">
+   463→            <Medal className="h-4 w-4 text-amber-400" /> {t('showcase')}
+   464→          </h3>
+   465→          <p className="mt-1 text-[10px] text-muted-foreground">{t('showcase_hint')}</p>
+   466→          {showcase.length > 0 && (
+   467→            <div className="mt-2 flex flex-wrap gap-1.5">
+   468→              {showcase.map((id) => (
+   469→                <Badge key={id} variant="outline" className="border-amber-400/40 bg-amber-400/10 text-[10px] font-black text-amber-300">
+   470→                  🏆 {achLabelById(id, t)}
+   471→                </Badge>
+   472→              ))}
+   473→            </div>
+   474→          )}
+   475→          <div className="nice-scroll mt-3 max-h-40 space-y-1 overflow-y-auto pe-1">
+   476→            {achs === null ? (
+   477→              <Skeleton className="h-16 w-full" />
+   478→            ) : unlocked.length === 0 ? (
+   479→              <p className="py-2 text-xs text-muted-foreground">—</p>
+   480→            ) : (
+   481→              unlocked.map((a) => {
+   482→                const checked = showcase.includes(a.id);
+   483→                return (
+   484→                  <label
+   485→                    key={a.id}
+   486→                    className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-xs transition-colors hover:bg-muted/60"
+   487→                  >
+   488→                    <Checkbox
+   489→                      checked={checked}
+   490→                      disabled={!checked && showcase.length >= 3}
+   491→                      onCheckedChange={(v) => void toggleShowcase(a.id, v === true)}
+   492→                    />
+   493→                    <span
+   494→                      className="grid h-6 w-6 shrink-0 place-items-center rounded"
+   495→                      style={{ background: `${RARITY_META[a.rarity].color}1a`, color: RARITY_META[a.rarity].color }}
+   496→                    >
+   497→                      <AchIcon name={a.icon} className="h-3.5 w-3.5" />
+   498→                    </span>
+   499→                    <span className="truncate font-bold">{achLabelById(a.id, t)}</span>
+   500→                  </label>
+   501→                );
+   502→              })
+   503→            )}
+   504→          </div>
+   505→        </section>
+   506→      </div>
+   507→
+   508→      {/* ---------- achievements ---------- */}
+   509→      <section>
+   510→        <h2 className="mb-2 flex items-center gap-2 text-base font-black">
+   511→          <Sparkles className="h-4 w-4 text-fuchsia-400" /> {t('achievements')}
+   512→        </h2>
+   513→        {achs === null ? (
+   514→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   515→            {Array.from({ length: 8 }).map((_, i) => (
+   516→              <Skeleton key={i} className="h-32 rounded-2xl" />
+   517→            ))}
+   518→          </div>
+   519→        ) : (
+   520→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   521→            {achs.map((a) => {
+   522→              const meta = RARITY_META[a.rarity];
+   523→              const Icon = ACH_ICONS[a.icon] ?? Sparkles;
+   524→              return (
+   525→                <div
+   526→                  key={a.id}
+   527→                  className={cn(
+   528→                    'royal-card flex flex-col rounded-2xl p-3 transition-all hover:scale-[1.02]',
+   529→                    !a.unlockedAt && 'opacity-75',
+   530→                    a.unlockedAt && 'glow-gold',
+   531→                  )}
+   532→                  style={{ borderColor: `${meta.color}44` }}
+   533→                >
+   534→                  <div className="flex items-start justify-between">
+   535→                    <span
+   536→                      className="grid h-9 w-9 place-items-center rounded-lg"
+   537→                      style={{ background: `${meta.color}1f`, color: meta.color }}
+   538→                    >
+   539→                      <Icon className="h-5 w-5" />
+   540→                    </span>
+   541→                    {a.unlockedAt ? (
+   542→                      <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[9px] font-black text-emerald-300">
+   543→                        ✓ {t('unlocked')}
+   544→                      </Badge>
+   545→                    ) : (
+   546→                      <span className="text-[10px] text-muted-foreground" title={t('locked')}>
+   547→                        🔒
+   548→                      </span>
+   549→                    )}
+   550→                  </div>
+   551→                  <div className="mt-2 truncate text-xs font-black">{achLabelById(a.id, t)}</div>
+   552→                  <Progress value={(a.progress / a.goal) * 100} className="mt-2 h-1.5" />
+   553→                  <div className="mt-1.5 flex items-center justify-between text-[10px] text-muted-foreground">
+   554→                    <span className="font-bold">
+   555→                      {localizeDigits(Math.min(a.progress, a.goal), locale)} / {localizeDigits(a.goal, locale)}
+   556→                    </span>
+   557→                    <span className="font-black text-amber-400">+{localizeDigits(a.coins, locale)} 🪙</span>
+   558→                  </div>
+   559→                  {a.unlockedAt && <div className="mt-1 text-[9px] text-muted-foreground">📅 {fmtDate(a.unlockedAt, locale)}</div>}
+   560→                </div>
+   561→              );
+   562→            })}
+   563→          </div>
+   564→        )}
+   565→      </section>
+   566→
+   567→      {/* ---------- match history ---------- */}
+   568→      <section className="royal-card rounded-2xl p-4">
+   569→        <h3 className="flex items-center gap-2 text-sm font-black">
+   570→          <Swords className="h-4 w-4 text-emerald-400" /> {t('history')}
+   571→        </h3>
+   572→        <div className="nice-scroll mt-3 max-h-80 space-y-2 overflow-y-auto pe-1">
+   573→          {games === null ? (
+   574→            Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 rounded-xl" />)
+   575→          ) : games.length === 0 ? (
+   576→            <p className="py-6 text-center text-xs text-muted-foreground">{t('no_history')}</p>
+   577→          ) : (
+   578→            games.map((g) => {
+   579→              const mb = modeBadge(g.mode);
+   580→              const result = g.draw
+   581→                ? { label: t('draws_stat'), cls: 'border-zinc-400/40 bg-zinc-400/10 text-zinc-300' }
+   582→                : g.youWon
+   583→                  ? { label: t('wins'), cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' }
+   584→                  : { label: t('losses'), cls: 'border-rose-500/40 bg-rose-500/10 text-rose-300' };
+   585→              return (
+   586→                <div
+   587→                  key={g.id}
+   588→                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/10 bg-muted/30 px-3 py-2 transition-colors hover:bg-muted/50"
+   589→                >
+   590→                  <div className="flex min-w-0 items-center gap-2">
+   591→                    <Badge variant="outline" className={cn('shrink-0 text-[9px] font-black', mb.cls)}>
+   592→                      {mb.label}
+   593→                    </Badge>
+   594→                    <span className="truncate text-xs font-bold">
+   595→                      {t('opponent')}: {opponentOf(g)}
+   596→                    </span>
+   597→                  </div>
+   598→                  <div className="flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+   599→                    <span>{endLabel(g.endReason)}</span>
+   600→                    <span>♟ {localizeDigits(g.moves, locale)}</span>
+   601→                    <span>⏱ {timeAgo(g.createdAt, locale)}</span>
+   602→                    <Badge variant="outline" className={cn('text-[9px] font-black', result.cls)}>
+   603→                      {result.label}
+   604→                    </Badge>
+   605→                  </div>
+   606→                </div>
+   607→              );
+   608→            })
+   609→          )}
+   610→        </div>
+   611→      </section>
+   612→
+   613→      {/* ---------- settings ---------- */}
+   614→      <section className="royal-card rounded-2xl p-4">
+   615→        <h3 className="flex items-center gap-2 text-sm font-black">
+   616→          <Settings2 className="h-4 w-4 text-sky-400" /> {t('settings')}
+   617→        </h3>
+   618→        <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-3">
+   619→          <div className="flex items-center gap-2">
+   620→            <Switch
+   621→              id="pf-sound"
+   622→              checked={user.soundOn}
+   623→              onCheckedChange={(v) => {
+   624→                patchUser({ soundOn: v });
+   625→                setSoundEnabled(v);
+   626→                sfx.click();
+   627→                api.patch('/api/profile', { soundOn: v }).catch(() => undefined);
+   628→              }}
+   629→            />
+   630→            <Label htmlFor="pf-sound" className="cursor-pointer text-xs font-bold">
+   631→              <Volume2 className="me-1 inline h-3.5 w-3.5" />
+   632→              {t('sound')}
+   633→            </Label>
+   634→          </div>
+   635→          <div className="flex items-center gap-2">
+   636→            <Globe className="h-4 w-4 text-muted-foreground" />
+   637→            <Select
+   638→              value={locale}
+   639→              onValueChange={(v) => {
+   640→                setLocale(v as Locale);
+   641→                sfx.click();
+   642→              }}
+   643→            >
+   644→              <SelectTrigger size="sm" className="w-36" aria-label={t('language')}>
+   645→                <SelectValue />
+   646→              </SelectTrigger>
+   647→              <SelectContent>
+   648→                {LOCALES.map((l) => (
+   649→                  <SelectItem key={l} value={l}>
+   650→                    {LOCALE_META[l].flag} {LOCALE_META[l].label}
+   651→                  </SelectItem>
+   652→                ))}
+   653→              </SelectContent>
+   654→            </Select>
+   655→          </div>
+   656→        </div>
+   657→      </section>
+   658→
+   659→      {/* ---------- report player ---------- */}
+   660→      <section className="royal-card rounded-2xl p-4">
+   661→        <Collapsible open={repOpen} onOpenChange={setRepOpen}>
+   662→          <div className="flex items-center justify-between gap-2">
+   663→            <h3 className="flex items-center gap-2 text-sm font-black">
+   664→              <Flag className="h-4 w-4 text-rose-400" /> {t('report')}
+   665→            </h3>
+   666→            <CollapsibleTrigger asChild>
+   667→              <Button variant="ghost" size="sm" aria-label={t('report')}>
+   668→                <ChevronDown className={cn('h-4 w-4 text-muted-foreground transition-transform', repOpen && 'rotate-180')} />
+   669→              </Button>
+   670→            </CollapsibleTrigger>
+   671→          </div>
+   672→          <CollapsibleContent className="mt-3 space-y-2">
+   673→            <div className="flex flex-wrap gap-2">
+   674→              <Input
+   675→                dir="ltr"
+   676→                className="min-w-40 flex-1"
+   677→                placeholder={t('reported_player')}
+   678→                value={repTarget}
+   679→                maxLength={32}
+   680→                onChange={(e) => setRepTarget(e.target.value)}
+   681→              />
+   682→              <Select value={repReason} onValueChange={(v) => setRepReason(v as (typeof REASONS)[number])}>
+   683→                <SelectTrigger size="sm" className="w-44" aria-label={t('reason')}>
+   684→                  <SelectValue />
+   685→                </SelectTrigger>
+   686→                <SelectContent>
+   687→                  {REASONS.map((r) => (
+   688→                    <SelectItem key={r} value={r}>
+   689→                      {t(`report_reason_${r}` as TKey)}
+   690→                    </SelectItem>
+   691→                  ))}
+   692→                </SelectContent>
+   693→              </Select>
+   694→            </div>
+   695→            <Textarea
+   696→              rows={2}
+   697→              maxLength={500}
+   698→              value={repDetails}
+   699→              onChange={(e) => setRepDetails(e.target.value)}
+   700→              placeholder={t('reason')}
+   701→            />
+   702→            <div className="flex justify-end">
+   703→              <Button
+   704→                size="sm"
+   705→                variant="outline"
+   706→                className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10"
+   707→                disabled={repBusy || !repTarget.trim()}
+   708→                onClick={() => void sendReport()}
+   709→              >
+   710→                <Flag className="h-4 w-4" /> {t('report')}
+   711→              </Button>
+   712→            </div>
+   713→          </CollapsibleContent>
+   714→        </Collapsible>
+   715→      </section>
+   716→    </div>
+   717→  );
+   718→}
+   719→

@@ -1,0 +1,530 @@
+   433→   433→  const rtl = locale === 'fa' || locale === 'ar';
+   434→   434→  const nameKey = arcadeId === 'boulderyard' ? 'game_boulderyard' : 'game_boulderyard2';
+   435→   435→
+   436→   436→  /* --- persistence load (garage shared across both games) --- */
+   437→   437→  useEffect(() => {
+   438→   438→    Promise.resolve().then(() => {
+   439→   439→      const g = loadGarage();
+   440→   440→      garageRef.current = g;
+   441→   441→      setGarage(g);
+   442→   442→      const p = loadProgress(storageKey);
+   443→   443→      progressRef.current = p;
+   444→   444→      setProgress(p);
+   445→   445→    });
+   446→   446→  }, [storageKey]);
+   447→   447→
+   448→   448→  const updateGarage = useCallback((g: GarageState) => {
+   449→   449→    garageRef.current = g;
+   450→   450→    setGarage(g);
+   451→   451→    saveGarage(g);
+   452→   452→  }, []);
+   453→   453→
+   454→   454→  const applyAbil = useCallback((c: Charges) => {
+   455→   455→    abilRef.current = c;
+   456→   456→    setAbil(c);
+   457→   457→  }, []);
+   458→   458→
+   459→   459→  const selDef: MachineDef = getMachine(garage.selected ?? 'tractor_old');
+   460→   460→  const es = useMemo(() => effectiveStats(selDef, garage), [selDef, garage]);
+   461→   461→  const digMax = es.dig;
+   462→   462→  const liftMax = es.lift;
+   463→   463→
+   464→   464→  const resetCharges = useCallback(() => {
+   465→   465→    const g = garageRef.current;
+   466→   466→    const m = getMachine(g ? g.selected : 'tractor_old');
+   467→   467→    const stats = g ? effectiveStats(m, g) : { power: 1, dig: 0, lift: 0 };
+   468→   468→    const init: Charges = { dig: stats.dig, lift: stats.lift, cargo: false };
+   469→   469→    abilSnap.current = [init];
+   470→   470→    applyAbil(init);
+   471→   471→  }, [applyAbil]);
+   472→   472→
+   473→   473→  /* responsive tile size */
+   474→   474→  useEffect(() => {
+   475→   475→    const el = boardRef.current;
+   476→   476→    if (!el || !game) return;
+   477→   477→    const measure = () => {
+   478→   478→      const w = el.clientWidth;
+   479→   479→      const size = Math.max(24, Math.min(52, Math.floor(w / game.cols)));
+   480→   480→      setTile(size);
+   481→   481→    };
+   482→   482→    measure();
+   483→   483→    const ro = new ResizeObserver(measure);
+   484→   484→    ro.observe(el);
+   485→   485→    return () => ro.disconnect();
+   486→   486→  }, [game?.cols, game]);
+   487→   487→
+   488→   488→  const totalStars = useMemo(() => Object.values(progress.stars).reduce((a, b) => a + b, 0), [progress]);
+   489→   489→
+   490→   490→  const startLevel = useCallback((idx: number) => {
+   491→   491→    submittedRef.current = false;
+   492→   492→    setLevelIdx(idx);
+   493→   493→    const g = createGame(levels[idx], idx);
+   494→   494→    gameRef.current = g;
+   495→   495→    setGame(g);
+   496→   496→    resetCharges();
+   497→   497→    setCelebrate(null);
+   498→   498→    setPhase('play');
+   499→   499→    sfx.click();
+   500→   500→  }, [levels, resetCharges]);
+   501→   501→
+   502→   502→  const restart = useCallback(() => {
+   503→   503→    const g = gameRef.current;
+   504→   504→    if (!g) return;
+   505→   505→    const ng = createGame(levels[g.levelIndex], g.levelIndex);
+   506→   506→    gameRef.current = ng;
+   507→   507→    setGame(ng);
+   508→   508→    resetCharges();
+   509→   509→    sfx.click();
+   510→   510→  }, [levels, resetCharges]);
+   511→   511→
+   512→   512→  const doUndo = useCallback(() => {
+   513→   513→    const g = gameRef.current;
+   514→   514→    if (!g || g.history.length === 0) return;
+   515→   515→    const u = engineUndo(g);
+   516→   516→    gameRef.current = u;
+   517→   517→    setGame(u);
+   518→   518→    const restored = abilSnap.current[u.history.length];
+   519→   519→    if (restored) applyAbil(restored);
+   520→   520→    sfx.click();
+   521→   521→  }, [applyAbil]);
+   522→   522→
+   523→   523→  /* invalid ability feedback: shake + buzz (skipped in perf mode) */
+   524→   524→  const invalidFx = useCallback(() => {
+   525→   525→    sfx.bad();
+   526→   526→    if (!perfMode) void shakeCtl.start({ x: [0, -8, 8, -5, 5, 0], transition: { duration: 0.3 } });
+   527→   527→  }, [perfMode, shakeCtl]);
+   528→   528→
+   529→   529→  /* solve flow: stars, progress persist, driver rewards, shared-economy submit */
+   530→   530→  const onSolve = useCallback(async (pushes: number, idx: number) => {
+   531→   531→    const par = levels[idx].par;
+   532→   532→    const stars = starsFor(pushes, par);
+   533→   533→    sfx.win();
+   534→   534→    const isLast = idx === levels.length - 1;
+   535→   535→
+   536→   536→    /* driver rewards (shared garage wallet across both games) */
+   537→   537→    const firstClear = (progressRef.current.stars[idx] ?? 0) === 0;
+   538→   538→    const reward = completionReward(idx + 1, stars, firstClear);
+   539→   539→    let levelUp = 0;
+   540→   540→    if (garageRef.current) {
+   541→   541→      const res = applyReward(garageRef.current, reward);
+   542→   542→      levelUp = res.levelUp;
+   543→   543→      updateGarage(res.garage);
+   544→   544→    }
+   545→   545→    if (levelUp > 0) {
+   546→   546→      sfx.levelup();
+   547→   547→      toast.success(`🎖️ ${t('g_levelup_toast')}`);
+   548→   548→    }
+   549→   549→
+   550→   550→    /* progress persist */
+   551→   551→    const prev = progressRef.current;
+   552→   552→    const next: BoulderProgress = {
+   553→   553→      unlocked: Math.max(prev.unlocked, Math.min(idx + 1, levels.length - 1)),
+   554→   554→      stars: { ...prev.stars, [idx]: Math.max(prev.stars[idx] ?? 0, stars) },
+   555→   555→    };
+   556→   556→    progressRef.current = next;
+   557→   557→    setProgress(next);
+   558→   558→    saveProgress(storageKey, next);
+   559→   559→
+   560→   560→    setCelebrate({ stars, pushes, par, last: isLast, money: reward.money, xp: reward.xp, levelUp });
+   561→   561→
+   562→   562→    if (submittedRef.current) return;
+   563→   563→    submittedRef.current = true;
+   564→   564→    const score = 100 * (idx + 1) + 50 * stars + Math.max(0, par * 3 - pushes) * 5;
+   565→   565→    if (isLast) {
+   566→   566→      const rewards = user ? await submitArcade(arcadeId, score, { level: idx + 1, stars, pushes }) : null;
+   567→   567→      setFinalModal({ score, rewards });
+   568→   568→      setCelebrate(null);
+   569→   569→    } else if (user) {
+   570→   570→      const r = await submitArcade(arcadeId, score, { level: idx + 1, stars, pushes });
+   571→   571→      if (r) announceArcadeRewards(r);
+   572→   572→    }
+   573→   573→  }, [levels, storageKey, arcadeId, user, t, updateGarage]);
+   574→   574→
+   575→   575→  /* move handler (gameRef pattern — always synchronous) */
+   576→   576→  const move = useCallback((dir: Dir) => {
+   577→   577→    const g = gameRef.current;
+   578→   578→    if (!g || g.solved) return;
+   579→   579→    const r = step(g, dir, { power: es.power });
+   580→   580→    if (!r.moved) return;
+   581→   581→    if (r.pushed) sfx.drop(); else sfx.click();
+   582→   582→    const next: Charges = { ...abilRef.current };
+   583→   583→    abilSnap.current[r.state.history.length] = next;
+   584→   584→    applyAbil(next);
+   585→   585→    gameRef.current = r.state;
+   586→   586→    setGame(r.state);
+   587→   587→    if (r.state.solved) void onSolve(r.state.pushes, r.state.levelIndex);
+   588→   588→  }, [onSolve, applyAbil, es.power]);
+   589→   589→
+   590→   590→  /* machine abilities (dig / grab / drop) — charges live here, not in engine snapshots */
+   591→   591→  const doAbility = useCallback((kind: AbilityKind) => {
+   592→   592→    const g = gameRef.current;
+   593→   593→    if (!g || g.solved) return;
+   594→   594→    const gar = garageRef.current;
+   595→   595→    if (!gar) return;
+   596→   596→    const m = getMachine(gar.selected);
+   597→   597→    const stats = effectiveStats(m, gar);
+   598→   598→    const a = abilRef.current;
+   599→   599→    if (kind === 'dig' && (stats.dig <= 0 || a.dig <= 0)) return invalidFx();
+   600→   600→    if (kind === 'grab' && (stats.lift <= 0 || a.lift <= 0 || a.cargo)) return invalidFx();
+   601→   601→    if (kind === 'drop' && !a.cargo) return invalidFx();
+   602→   602→    const r = step(g, g.facing, { ability: kind });
+   603→   603→    if (!r.moved) return invalidFx(); // invalid target: no charge consumed
+   604→   604→    const next: Charges = {
+   605→   605→      dig: a.dig - (kind === 'dig' ? 1 : 0),
+   606→   606→      lift: a.lift - (kind === 'grab' ? 1 : 0), // grab consumes a charge; drop is free
+   607→   607→      cargo: kind === 'grab' ? true : kind === 'drop' ? false : a.cargo,
+   608→   608→    };
+   609→   609→    abilSnap.current[r.state.history.length] = next;
+   610→   610→    applyAbil(next);
+   611→   611→    gameRef.current = r.state;
+   612→   612→    setGame(r.state);
+   613→   613→    if (kind === 'dig') sfx.drop(); else sfx.capture();
+   614→   614→    if (r.state.solved) void onSolve(r.state.pushes, r.state.levelIndex);
+   615→   615→  }, [onSolve, applyAbil, invalidFx]);
+   616→   616→
+   617→   617→  const doDig = useCallback(() => doAbility('dig'), [doAbility]);
+   618→   618→  const doGrab = useCallback(() => doAbility('grab'), [doAbility]);
+   619→   619→  const doDrop = useCallback(() => doAbility('drop'), [doAbility]);
+   620→   620→
+   621→   621→  /* keyboard */
+   622→   622→  useEffect(() => {
+   623→   623→    if (phase !== 'play' || celebrate) return;
+   624→   624→    const onKey = (e: KeyboardEvent) => {
+   625→   625→      const map: Record<string, Dir> = {
+   626→   626→        ArrowUp: 'U', ArrowDown: 'D', ArrowLeft: 'L', ArrowRight: 'R',
+   627→   627→        w: 'U', s: 'D', a: 'L', d: 'R', W: 'U', S: 'D', A: 'L',
+   628→   628→      };
+   629→   629→      const dir = map[e.key];
+   630→   630→      if (dir) { e.preventDefault(); move(dir); return; }
+   631→   631→      if (e.key === 'D') { e.preventDefault(); doDig(); return; } // ⇧D = dig ('d' stays "move right")
+   632→   632→      if (e.key === 'g' || e.key === 'G') { e.preventDefault(); doGrab(); return; }
+   633→   633→      if (e.key === 'h' || e.key === 'H') { e.preventDefault(); doDrop(); return; }
+   634→   634→      if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); doUndo(); }
+   635→   635→      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+   636→   636→    };
+   637→   637→    window.addEventListener('keydown', onKey);
+   638→   638→    return () => window.removeEventListener('keydown', onKey);
+   639→   639→  }, [phase, celebrate, move, doUndo, restart, doDig, doGrab, doDrop]);
+   640→   640→
+   641→   641→  /* swipe */
+   642→   642→  const onTouchStart = (e: React.TouchEvent) => {
+   643→   643→    const t0 = e.touches[0];
+   644→   644→    touchStart.current = { x: t0.clientX, y: t0.clientY };
+   645→   645→  };
+   646→   646→  const onTouchEnd = (e: React.TouchEvent) => {
+   647→   647→    if (!touchStart.current) return;
+   648→   648→    const t1 = e.changedTouches[0];
+   649→   649→    const dx = t1.clientX - touchStart.current.x;
+   650→   650→    const dy = t1.clientY - touchStart.current.y;
+   651→   651→    touchStart.current = null;
+   652→   652→    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+   653→   653→    if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? 'R' : 'L');
+   654→   654→    else move(dy > 0 ? 'D' : 'U');
+   655→   655→  };
+   656→   656→
+   657→   657→  /* ---------------- render ---------------- */
+   658→   658→  if (!booted) {
+   659→   659→    return <RetroBoot title={bootTitle} subtitle={bootSubtitle} accent={bootAccent} cartridgeIcon={bootIcon} onDone={() => setBooted(true)} />;
+   660→   660→  }
+   661→   661→
+   662→   662→  const boardW = game ? game.cols * tile : 0;
+   663→   663→  const boardH = game ? game.rows * tile : 0;
+   664→   664→
+   665→   665→  const boardNode = game && (
+   666→   666→    <div
+   667→   667→      ref={boardRef}
+   668→   668→      dir="ltr"
+   669→   669→      className="relative mx-auto touch-none rounded-xl border-2 border-amber-700/40 bg-gradient-to-br from-[#2a2118] to-[#1c1610] p-1.5 shadow-xl"
+   670→   670→      style={{ width: boardW + 12, height: boardH + 12 }}
+   671→   671→      onTouchStart={onTouchStart}
+   672→   672→      onTouchEnd={onTouchEnd}
+   673→   673→      role="application"
+   674→   674→      aria-label={t(nameKey)}
+   675→   675→    >
+   676→   676→      <div className="relative" style={{ width: boardW, height: boardH }}>
+   677→   677→        {/* static tiles */}
+   678→   678→        {Array.from({ length: game.rows * game.cols }).map((_, i) => {
+   679→   679→          const r = Math.floor(i / game.cols), c = i % game.cols;
+   680→   680→          const isWall = game.wall[i];
+   681→   681→          const kind = isWall ? 'wall' : game.targets.has(i) ? 'target' : game.pits.has(i) ? 'pit' : game.gates.has(i) ? 'gate' : 'floor';
+   682→   682→          return (
+   683→   683→            <div key={i} className="absolute" style={{ left: c * tile, top: r * tile, width: tile, height: tile }}>
+   684→   684→              <Tile kind={kind} gates={kind === 'gate' ? game.gates.get(i) : undefined} />
+   685→   685→            </div>
+   686→   686→          );
+   687→   687→        })}
+   688→   688→        {/* boulders */}
+   689→   689→        {[...game.boulders].map((b) => {
+   690→   690→          const r = Math.floor(b / game.cols), c = b % game.cols;
+   691→   691→          return (
+   692→   692→            <motion.div
+   693→   693→              key={b}
+   694→   694→              className="absolute"
+   695→   695→              style={{ width: tile, height: tile, zIndex: 2 }}
+   696→   696→              initial={false}
+   697→   697→              animate={{ x: c * tile, y: r * tile }}
+   698→   698→              transition={{ type: 'tween', duration: 0.11, ease: 'easeOut' }}
+   699→   699→            >
+   700→   700→              <Boulder />
+   701→   701→            </motion.div>
+   702→   702→          );
+   703→   703→        })}
+   704→   704→        {/* player machine */}
+   705→   705→        <motion.div
+   706→   706→          className="absolute"
+   707→   707→          style={{ width: tile, height: tile, zIndex: 3 }}
+   708→   708→          initial={false}
+   709→   709→          animate={{ x: (game.player % game.cols) * tile, y: Math.floor(game.player / game.cols) * tile }}
+   710→   710→          transition={{ type: 'tween', duration: Math.max(0.05, 0.09 / selDef.speed), ease: 'easeOut' }}
+   711→   711→        >
+   712→   712→          <MachineToken def={selDef} facing={game.facing} carrying={abil.cargo} perf={perfMode} />
+   713→   713→        </motion.div>
+   714→   714→      </div>
+   715→   715→    </div>
+   716→   716→  );
+   717→   717→
+   718→   718→  const dpad = (
+   719→   719→    <div className="mx-auto grid w-max grid-cols-3 gap-1.5" aria-hidden>
+   720→   720→      <span />
+   721→   721→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('U')} aria-label="up">▲</Button>
+   722→   722→      <span />
+   723→   723→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('L')} aria-label="left">◀</Button>
+   724→   724→      <Button variant="outline" className="h-12 w-12 p-0 text-[10px]" onClick={doUndo} aria-label="undo">↺</Button>
+   725→   725→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('R')} aria-label="right">▶</Button>
+   726→   726→      <span />
+   727→   727→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('D')} aria-label="down">▼</Button>
+   728→   728→      <span />
+   729→   729→    </div>
+   730→   730→  );
+   731→   731→
+   732→   732→  /* ability buttons — only for machines that own the charges (≥56px touch) */
+   733→   733→  const abilityBtn = 'h-14 min-w-[64px] flex-col gap-0.5 rounded-xl p-1 text-[10px] font-bold leading-none';
+   734→   734→  const abilities = (
+   735→   735→    <div className="flex flex-col gap-2" aria-label="machine abilities">
+   736→   736→      {digMax > 0 && (
+   737→   737→        <Button variant="outline" className={abilityBtn} disabled={abil.dig <= 0} onClick={doDig} aria-label={t('g_dig')}>
+   738→   738→          <span className="text-xl leading-none">🪣</span>
+   739→   739→          <span>{t('g_dig')} · {localizeDigits(abil.dig, locale)}</span>
+   740→   740→        </Button>
+   741→   741→      )}
+   742→   742→      {liftMax > 0 && (
+   743→   743→        <Button variant="outline" className={`${abilityBtn} ${abil.cargo ? 'border-violet-400/70 bg-violet-500/10' : ''}`} disabled={abil.lift <= 0 && !abil.cargo} onClick={abil.cargo ? doDrop : doGrab} aria-label={abil.cargo ? t('g_drop') : t('g_grab')}>
+   744→   744→          <span className="text-xl leading-none">{abil.cargo ? '📦' : '🏗️'}</span>
+   745→   745→          <span>{abil.cargo ? t('g_drop') : t('g_grab')}{!abil.cargo && abil.lift > 0 ? ` · ${localizeDigits(abil.lift, locale)}` : ''}</span>
+   746→   746→        </Button>
+   747→   747→      )}
+   748→   748→    </div>
+   749→   749→  );
+   750→   750→  const hasAbilities = digMax > 0 || liftMax > 0;
+   751→   751→
+   752→   752→  /* machine chips for the in-game HUD */
+   753→   753→  const machineChips = (
+   754→   754→    <>
+   755→   755→      <span className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-2 py-1 text-xs font-bold text-emerald-300 ring-1 ring-emerald-400/30">
+   756→   756→        <span className="inline-block h-4 w-7 shrink-0"><MachineSprite def={selDef} /></span>
+   757→   757→        <span className="max-w-28 truncate">{t('g_m_' + selDef.id)}</span>
+   758→   758→      </span>
+   759→   759→      {digMax > 0 && (
+   760→   760→        <span className="rounded-lg bg-sky-500/10 px-2 py-1 text-xs font-bold text-sky-300 ring-1 ring-sky-400/30">🪣 {localizeDigits(abil.dig, locale)}</span>
+   761→   761→      )}
+   762→   762→      {liftMax > 0 && (
+   763→   763→        <span className="rounded-lg bg-violet-500/10 px-2 py-1 text-xs font-bold text-violet-300 ring-1 ring-violet-400/30">🏗️ {localizeDigits(abil.lift, locale)}</span>
+   764→   764→      )}
+   765→   765→      {abil.cargo && (
+   766→   766→        <span className="rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300 ring-1 ring-amber-400/30">📦 {t('g_cargo')}</span>
+   767→   767→      )}
+   768→   768→    </>
+   769→   769→  );
+   770→   770→
+   771→   771→  return (
+   772→   772→    <div className="mx-auto max-w-3xl px-3 py-4" dir={rtl ? 'rtl' : 'ltr'}>
+   773→   773→      {/* ---------- intro ---------- */}
+   774→   774→      {phase === 'intro' && (
+   775→   775→        <div className="royal-card mx-auto max-w-md rounded-3xl p-6 text-center">
+   776→   776→          <div className="mx-auto mb-3 grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400/30 to-emerald-700/30 text-3xl shadow-lg ring-1 ring-emerald-400/40">
+   777→   777→            {arcadeId === 'boulderyard' ? '🪨' : '🕳️'}
+   778→   778→          </div>
+   779→   779→          <h2 className="gold-text text-2xl font-black">{t(nameKey)}</h2>
+   780→   780→          <p className="mt-1 text-xs text-muted-foreground">
+   781→   781→            {localizeDigits(levels.length, locale)} {t('by_levels')} · ⭐ {localizeDigits(totalStars, locale)}/{localizeDigits(levels.length * 3, locale)}
+   782→   782→            {progress.unlocked > 0 && ` · ${t('by_best')}: ${t('by_level')} ${localizeDigits(progress.unlocked + 1, locale)}`}
+   783→   783→          </p>
+   784→   784→          {/* driver chip */}
+   785→   785→          <div className="mx-auto mt-3 flex w-max items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-1.5 text-xs">
+   786→   786→            <span className="inline-block h-5 w-9"><MachineSprite def={selDef} /></span>
+   787→   787→            <span className="font-bold text-emerald-300">{t('g_m_' + selDef.id)}</span>
+   788→   788→            <span className="text-muted-foreground">· 🎖️ {localizeDigits(garage.driverLevel, locale)} · 💵 {localizeDigits(garage.money, locale)}</span>
+   789→   789→          </div>
+   790→   790→          <div className="mt-4 space-y-2 text-start">
+   791→   791→            {helpRows.map((h, i) => (
+   792→   792→              <div key={i} className="flex items-center gap-2 rounded-xl bg-muted/50 px-3 py-2 text-xs">
+   793→   793→                <span className="text-base">{h.icon}</span>
+   794→   794→                <span>{t(h.key)}</span>
+   795→   795→              </div>
+   796→   796→            ))}
+   797→   797→          </div>
+   798→   798→          <div className="mt-5 flex gap-2">
+   799→   799→            <Button className="flex-1 glow-gold" onClick={() => startLevel(Math.min(progress.unlocked, levels.length - 1))}>
+   800→   800→              ▶ {progress.unlocked > 0 ? t('by_continue') : t('by_start')}
+   801→   801→            </Button>
+   802→   802→            <Button variant="outline" onClick={() => { setPhase('select'); sfx.click(); }}>{t('by_levels')}</Button>
+   803→   803→          </div>
+   804→   804→          <Button variant="outline" className="mt-2 w-full" onClick={() => { setGarageFrom('intro'); setPhase('garage'); sfx.click(); }}>🚜 {t('g_open_garage')}</Button>
+   805→   805→          <Button variant="ghost" className="mt-2 text-xs text-muted-foreground" onClick={() => { sfx.click(); onExit(); }}>
+   806→   806→            ← {t('back_park')}
+   807→   807→          </Button>
+   808→   808→        </div>
+   809→   809→      )}
+   810→   810→
+   811→   811→      {/* ---------- level select ---------- */}
+   812→   812→      {phase === 'select' && (
+   813→   813→        <div className="royal-card mx-auto max-w-lg rounded-3xl p-5">
+   814→   814→          <div className="mb-3 flex items-center justify-between">
+   815→   815→            <h3 className="text-lg font-black gold-text">{t('by_levels')}</h3>
+   816→   816→            <Badge>⭐ {localizeDigits(totalStars, locale)}/{localizeDigits(levels.length * 3, locale)}</Badge>
+   817→   817→          </div>
+   818→   818→          {/* machine slot */}
+   819→   819→          <div className="mb-3 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+   820→   820→            <span className="hidden text-[10px] uppercase tracking-wide text-muted-foreground sm:inline">{t('g_machine_slot')}</span>
+   821→   821→            <span className="inline-block h-7 w-12 shrink-0"><MachineSprite def={selDef} /></span>
+   822→   822→            <span className="truncate text-sm font-black text-emerald-300">{t('g_m_' + selDef.id)}</span>
+   823→   823→            <Button variant="ghost" size="sm" className="ms-auto h-8 shrink-0 text-xs" onClick={() => { setGarageFrom('select'); setPhase('garage'); sfx.click(); }}>🔧 {t('g_change')}</Button>
+   824→   824→          </div>
+   825→   825→          <div className="nice-scroll max-h-[52dvh] space-y-4 overflow-y-auto pe-1">
+   826→   826→            {[1, 2, 3].map((yard) => (
+   827→   827→              <div key={yard}>
+   828→   828→                <div className="mb-1.5 text-xs font-bold text-muted-foreground">{t('by_yard')} {localizeDigits(yard, locale)}</div>
+   829→   829→                <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+   830→   830→                  {levels.slice((yard - 1) * yardSize, yard * yardSize).map((_, i) => {
+   831→   831→                    const idx = (yard - 1) * yardSize + i;
+   832→   832→                    const locked = idx > progress.unlocked;
+   833→   833→                    const st = progress.stars[idx] ?? 0;
+   834→   834→                    return (
+   835→   835→                      <button
+   836→   836→                        key={idx}
+   837→   837→                        disabled={locked}
+   838→   838→                        onClick={() => startLevel(idx)}
+   839→   839→                        className={`flex h-14 flex-col items-center justify-center rounded-xl border text-sm font-black transition ${
+   840→   840→                          locked ? 'border-border/50 bg-muted/30 text-muted-foreground/50' : 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:border-amber-400 hover:bg-amber-500/20'
+   841→   841→                        }`}
+   842→   842→                        aria-label={`${t('by_level')} ${idx + 1}${locked ? ' 🔒' : ''}`}
+   843→   843→                      >
+   844→   844→                        <span>{locked ? '🔒' : localizeDigits(idx + 1, locale)}</span>
+   845→   845→                        {!locked && <span className="text-[9px] leading-none">{'⭐'.repeat(st) || '·'}</span>}
+   846→   846→                      </button>
+   847→   847→                    );
+   848→   848→                  })}
+   849→   849→                </div>
+   850→   850→              </div>
+   851→   851→            ))}
+   852→   852→          </div>
+   853→   853→          <Button variant="ghost" className="mt-3 w-full text-xs" onClick={() => { setPhase('intro'); sfx.click(); }}>← {t('back')}</Button>
+   854→   854→        </div>
+   855→   855→      )}
+   856→   856→
+   857→   857→      {/* ---------- garage ---------- */}
+   858→   858→      {phase === 'garage' && (
+   859→   859→        <GarageScreen garage={garage} update={updateGarage} onBack={() => { setPhase(garageFrom); sfx.click(); }} />
+   860→   860→      )}
+   861→   861→
+   862→   862→      {/* ---------- play ---------- */}
+   863→   863→      {phase === 'play' && game && (
+   864→   864→        <div>
+   865→   865→          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+   866→   866→            <div className="flex flex-wrap items-center gap-1.5 text-sm font-black">
+   867→   867→              <span className="rounded-lg bg-amber-500/15 px-2 py-1 text-amber-300">{t('by_level')} {localizeDigits(game.levelIndex + 1, locale)}</span>
+   868→   868→              <span className="rounded-lg bg-muted px-2 py-1 text-xs text-muted-foreground">
+   869→   869→                {t('by_pushes')}: {localizeDigits(game.pushes, locale)} / {t('by_par')} {localizeDigits(levels[game.levelIndex].par, locale)}
+   870→   870→              </span>
+   871→   871→              {machineChips}
+   872→   872→            </div>
+   873→   873→            <div className="flex items-center gap-1">
+   874→   874→              <Button variant="outline" size="sm" className="h-9" onClick={restart}>⟳ {t('by_restart')}</Button>
+   875→   875→              <Button variant="outline" size="sm" className="h-9" onClick={() => { setPhase('select'); setGame(null); gameRef.current = null; sfx.click(); }}>☰ {t('by_levels')}</Button>
+   876→   876→              <Button variant="ghost" size="sm" className="h-9" onClick={() => { sfx.click(); onExit(); }}>✕</Button>
+   877→   877→            </div>
+   878→   878→          </div>
+   879→   879→          <motion.div animate={shakeCtl} className="mx-auto w-max">
+   880→   880→            {boardNode}
+   881→   881→          </motion.div>
+   882→   882→          <div className="mt-4 flex items-start justify-center gap-3 sm:gap-6">
+   883→   883→            {dpad}
+   884→   884→            {hasAbilities && abilities}
+   885→   885→          </div>
+   886→   886→          <p className="mt-3 hidden text-center text-[10px] text-muted-foreground md:block">
+   887→   887→            {t('by_keys_hint')}
+   888→   888→          </p>
+   889→   889→          {hasAbilities && (
+   890→   890→            <p className="mt-1 hidden text-center text-[10px] text-muted-foreground md:block">
+   891→   891→              {t('g_keys_abilities')}
+   892→   892→            </p>
+   893→   893→          )}
+   894→   894→        </div>
+   895→   895→      )}
+   896→   896→
+   897→   897→      {/* ---------- solve celebration ---------- */}
+   898→   898→      <AnimatePresence>
+   899→   899→        {celebrate && (
+   900→   900→          <motion.div
+   901→   901→            className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm"
+   902→   902→            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+   903→   903→          >
+   904→   904→            <motion.div
+   905→   905→              className="royal-card w-full max-w-xs rounded-3xl p-6 text-center"
+   906→   906→              initial={{ scale: 0.7, y: 30 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.8, opacity: 0 }}
+   907→   907→              transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+   908→   908→            >
+   909→   909→              <div className="text-4xl">🎉</div>
+   910→   910→              <h3 className="mt-2 text-xl font-black gold-text">{t('by_solved')}</h3>
+   911→   911→              <div className="my-3 flex justify-center gap-1.5">
+   912→   912→                {[1, 2, 3].map((i) => (
+   913→   913→                  <motion.span
+   914→   914→                    key={i}
+   915→   915→                    className={`text-4xl ${i <= celebrate.stars ? '' : 'opacity-25 grayscale'}`}
+   916→   916→                    initial={{ scale: 0, rotate: -40 }}
+   917→   917→                    animate={{ scale: 1, rotate: 0 }}
+   918→   918→                    transition={{ delay: 0.15 * i, type: 'spring', stiffness: 300, damping: 12 }}
+   919→   919→                  >⭐</motion.span>
+   920→   920→                ))}
+   921→   921→              </div>
+   922→   922→              <p className="text-sm text-muted-foreground">
+   923→   923→                {t('by_pushes')}: <b className="text-foreground">{localizeDigits(celebrate.pushes, locale)}</b> · {t('by_par')}: {localizeDigits(celebrate.par, locale)}
+   924→   924→              </p>
+   925→   925→              <p className="mt-1.5 rounded-xl bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-300 ring-1 ring-emerald-400/30">
+   926→   926→                {t('g_earned')}: 💵 +{localizeDigits(celebrate.money, locale)} · ✦ +{localizeDigits(celebrate.xp, locale)}
+   927→   927→              </p>
+   928→   928→              {celebrate.levelUp > 0 && (
+   929→   929→                <p className="mt-1 text-xs font-black text-amber-300">🎖️ {t('g_levelup_toast')}</p>
+   930→   930→              )}
+   931→   931→              {!celebrate.last && (
+   932→   932→                <Button className="mt-4 w-full glow-gold" onClick={() => startLevel(Math.min(levelIdx + 1, levels.length - 1))}>
+   933→   933→                  {t('by_next')} →
+   934→   934→                </Button>
+   935→   935→              )}
+   936→   936→              <Button variant="outline" className="mt-2 w-full" onClick={() => { setCelebrate(null); setPhase('select'); setGame(null); gameRef.current = null; sfx.click(); }}>
+   937→   937→                ☰ {t('by_levels')}
+   938→   938→              </Button>
+   939→   939→            </motion.div>
+   940→   940→          </motion.div>
+   941→   941→        )}
+   942→   942→      </AnimatePresence>
+   943→   943→
+   944→   944→      {/* campaign finale — shared result modal */}
+   945→   945→      <ArcadeResultModal
+   946→   946→        open={!!finalModal}
+   947→   947→        title={t('by_campaign_done')}
+   948→   948→        subtitle={t('by_yard_done')}
+   949→   949→        score={finalModal?.score ?? 0}
+   950→   950→        rewards={finalModal?.rewards ?? null}
+   951→   951→        emoji="🏆"
+   952→   952→        onAgain={() => { setFinalModal(null); setPhase('select'); }}
+   953→   953→        onExit={() => { setFinalModal(null); onExit(); }}
+   954→   954→      />
+   955→   955→    </div>
+   956→   956→  );
+   957→   957→}
+   958→   958→
+   959→   959→function Badge({ children }: { children: React.ReactNode }) {
+   960→   960→  return <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-bold text-amber-300">{children}</span>;
+   961→   961→}
+   962→   962→

@@ -1,0 +1,1214 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * Orbit Odyssey (ادیسهٔ مداری) — a REAL-orbital-mechanics puzzle campaign.
+     5→ * Physics: Newtonian gravity a = Σ GMᵢ(rᵢ−r)/|rᵢ−r|³, semi-implicit Euler @60 Hz,
+     6→ * identical integrator for the live aim-prediction and the actual flight (see
+     7→ * src/lib/game/orbit-missions.ts for tuning constants + beatability QA notes).
+     8→ *
+     9→ * Structure: campaign map → briefing → canvas play (aim ▸ launch ▸ coast/burn ▸ capture).
+    10→ * Economy: victory submits via useArcadeFinish('orbit'); losses stay local (score 0).
+    11→ */
+    12→
+    13→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+    14→import { motion } from 'framer-motion';
+    15→import { toast } from 'sonner';
+    16→import { useApp } from '@/store/app';
+    17→import { localizeDigits } from '@/lib/i18n';
+    18→import { useArcadeFinish } from '@/lib/arcade-client';
+    19→import { sfx } from '@/lib/sound';
+    20→import { Button } from '@/components/ui/button';
+    21→import { Badge } from '@/components/ui/badge';
+    22→import { Progress } from '@/components/ui/progress';
+    23→import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    24→import {
+    25→  ArrowLeft, BookOpen, CheckCircle2, FlaskConical, Fuel, Lightbulb, Lock,
+    26→  RotateCcw, Target, Timer, Trophy,
+    27→} from 'lucide-react';
+    28→import {
+    29→  ACTS, CODEX, DT, FUEL_BURN, LAUNCH_FUEL_PER_DV, LAUNCH_SCALE, MAX_DRAG, MISSIONS,
+    30→  PREDICT_STEPS, POD_PICKUP, TIME_LIMIT, THRUST_ACCEL, WORLD, Mission, PredictResult,
+    31→  Bi, hitsBody, outOfBounds, pick, predictPath, stepProbe,
+    32→} from '@/lib/game/orbit-missions';
+    33→
+    34→/* ============================================================ local strings */
+    35→
+    36→const DRAG_HINT: Bi = { fa: 'برای پرتاب، بکش و رها کن', en: 'Drag & release to launch' };
+    37→const BURN_HINT: Bi = { fa: 'نگه‌دار و بکش تا موتور بسوزد', en: 'Hold & drag to burn' };
+    38→const COAST_HINT: Bi = { fa: 'سوخت تمام شد — سُرِ بالستیک', en: 'Fuel empty — ballistic coast' };
+    39→const NEW_BEST: Bi = { fa: 'رکورد جدید!', en: 'New best!' };
+    40→const FINALE: Bi = {
+    41→  fa: 'منارهٔ هلیوگراف دوباره می‌درخشد؛ چهار سال سکوت به پایان رسید و تارِ علمی بشر از نو زنده است. دستِ تو — و فیزیکِ خالص — شبکه را به خانه آورد.',
+    42→  en: 'The Heliograph beacon burns again; four years of silence are over and humanity\'s web of science is alive once more. Your hand — and pure physics — brought the network home.',
+    43→};
+    44→const TRY_AGAIN_TIP: Bi = { fa: 'هر بار پرتاب، مسیر را از نو پیش‌بینی می‌کنیم — دوباره تلاش کن!', en: 'Every launch re-plots the live prediction — try again!' };
+    45→
+    46→/* ============================================================ canvas helpers */
+    47→
+    48→interface Star { x: number; y: number; r: number; ph: number; sp: number; base: number }
+    49→
+    50→function mulberry32(seed: number): () => number {
+    51→  let s = seed | 0;
+    52→  return () => {
+    53→    s = (s + 0x6d2b79f5) | 0;
+    54→    let z = Math.imul(s ^ (s >>> 15), 1 | s);
+    55→    z = (z + Math.imul(z ^ (z >>> 7), 61 | z)) ^ z;
+    56→    return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+    57→  };
+    58→}
+    59→
+    60→function makeStars(seed: number): Star[] {
+    61→  const rng = mulberry32(seed * 7919 + 13);
+    62→  const stars: Star[] = [];
+    63→  for (let i = 0; i < 150; i++) stars.push({ x: rng() * WORLD.w, y: rng() * WORLD.h, r: 0.7 + rng() * 1.5, ph: rng() * Math.PI * 2, sp: 0.5 + rng() * 1.6, base: 0.22 + rng() * 0.4 });
+    64→  for (let i = 0; i < 55; i++) stars.push({ x: rng() * WORLD.w, y: rng() * WORLD.h, r: 1.7 + rng() * 1.9, ph: rng() * Math.PI * 2, sp: 0.4 + rng() * 1.1, base: 0.3 + rng() * 0.4 });
+    65→  return stars;
+    66→}
+    67→
+    68→const NEBULAS = [
+    69→  { x: 330, y: 250, r: 500, c: '20,184,166', a: 0.1 },
+    70→  { x: 1290, y: 960, r: 540, c: '139,92,246', a: 0.08 },
+    71→  { x: 920, y: 520, r: 430, c: '245,158,11', a: 0.05 },
+    72→] as const;
+    73→
+    74→function shade(hex: string, amt: number): string {
+    75→  const n = parseInt(hex.slice(1), 16);
+    76→  let r = (n >> 16) & 255;
+    77→  let g = (n >> 8) & 255;
+    78→  let b = n & 255;
+    79→  if (amt >= 0) {
+    80→    r += (255 - r) * amt; g += (255 - g) * amt; b += (255 - b) * amt;
+    81→  } else {
+    82→    r *= 1 + amt; g *= 1 + amt; b *= 1 + amt;
+    83→  }
+    84→  return `rgb(${r | 0},${g | 0},${b | 0})`;
+    85→}
+    86→
+    87→function hexA(hex: string, a: number): string {
+    88→  const n = parseInt(hex.slice(1), 16);
+    89→  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+    90→}
+    91→
+    92→interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; c: string; r: number }
+    93→
+    94→/* ============================================================ canvas component */
+    95→
+    96→type Phase = 'aiming' | 'flight' | 'won' | 'crashed' | 'lost' | 'timeout';
+    97→
+    98→interface Sim {
+    99→  phase: Phase;
+   100→  x: number; y: number; vx: number; vy: number;
+   101→  fuel: number; time: number; heading: number;
+   102→  trail: { x: number; y: number }[]; trailTick: number;
+   103→  pods: boolean[];
+   104→  thrusting: boolean; thrustingNow: boolean; aimX: number; aimY: number;
+   105→  drag: { sx: number; sy: number; cx: number; cy: number } | null;
+   106→  prediction: PredictResult | null; dv: number;
+   107→  particles: Particle[]; shake: number;
+   108→}
+   109→
+   110→export interface HudSnap {
+   111→  phase: Phase;
+   112→  fuel: number; fuelMax: number;
+   113→  pods: number; podsTotal: number;
+   114→  timeLeft: number;
+   115→  dv: number; aiming: boolean; thrusting: boolean; coasting: boolean;
+   116→}
+   117→
+   118→function initSim(m: Mission): Sim {
+   119→  return {
+   120→    phase: 'aiming', x: m.start.x, y: m.start.y, vx: 0, vy: 0,
+   121→    fuel: m.startFuel, time: 0, heading: 0,
+   122→    trail: [], trailTick: 0, pods: m.pods.map(() => false),
+   123→    thrusting: false, thrustingNow: false, aimX: m.start.x, aimY: m.start.y,
+   124→    drag: null, prediction: null, dv: 0, particles: [], shake: 0,
+   125→  };
+   126→}
+   127→
+   128→/** Drag vector → capped, fuel-affordable launch Δv (pure; used by prediction & release). */
+   129→function aimDelta(s: Sim): { vx: number; vy: number; dv: number } {
+   130→  if (!s.drag) return { vx: 0, vy: 0, dv: 0 };
+   131→  const dx = (s.drag.cx - s.drag.sx) * LAUNCH_SCALE;
+   132→  const dy = (s.drag.cy - s.drag.sy) * LAUNCH_SCALE;
+   133→  const L = Math.hypot(dx, dy);
+   134→  const maxDv = Math.min(MAX_DRAG * LAUNCH_SCALE, s.fuel / LAUNCH_FUEL_PER_DV);
+   135→  const dv = Math.min(L, maxDv);
+   136→  if (L < 1e-6 || dv <= 0) return { vx: 0, vy: 0, dv: 0 };
+   137→  return { vx: (dx / L) * dv, vy: (dy / L) * dv, dv };
+   138→}
+   139→
+   140→function drawSphere(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string, lx: number, ly: number, arcs: number, t: number): void {
+   141→  // soft glow
+   142→  ctx.save();
+   143→  ctx.shadowColor = hexA(color, 0.55);
+   144→  ctx.shadowBlur = 16;
+   145→  const g = ctx.createRadialGradient(x + lx * r * 0.45, y + ly * r * 0.45, r * 0.12, x, y, r);
+   146→  g.addColorStop(0, shade(color, 0.55));
+   147→  g.addColorStop(0.55, color);
+   148→  g.addColorStop(1, shade(color, -0.62));
+   149→  ctx.fillStyle = g;
+   150→  ctx.beginPath();
+   151→  ctx.arc(x, y, r, 0, Math.PI * 2);
+   152→  ctx.fill();
+   153→  ctx.restore();
+   154→  // rotating surface arcs (clip to sphere)
+   155→  if (arcs > 0) {
+   156→    ctx.save();
+   157→    ctx.beginPath();
+   158→    ctx.arc(x, y, r - 1, 0, Math.PI * 2);
+   159→    ctx.clip();
+   160→    ctx.strokeStyle = 'rgba(0,0,0,0.18)';
+   161→    ctx.lineWidth = Math.max(1.4, r * 0.06);
+   162→    for (let i = 0; i < arcs; i++) {
+   163→      const a0 = t * (0.14 + i * 0.05) * (i % 2 ? -1 : 1) + i * 2.4;
+   164→      ctx.beginPath();
+   165→      ctx.arc(x, y, r * (0.4 + i * 0.26), a0, a0 + 1.9 + i * 0.4);
+   166→      ctx.stroke();
+   167→    }
+   168→    ctx.restore();
+   169→  }
+   170→  // rim light on the lit side
+   171→  const la = Math.atan2(ly, lx);
+   172→  ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+   173→  ctx.lineWidth = 1.6;
+   174→  ctx.beginPath();
+   175→  ctx.arc(x, y, r - 1.1, la - 1.7, la + 1.7);
+   176→  ctx.stroke();
+   177→}
+   178→
+   179→function drawRingedPlanet(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color: string, lx: number, ly: number, t: number): void {
+   180→  const rot = -0.38;
+   181→  const rx = r * 1.78;
+   182→  const ry = r * 0.52;
+   183→  // back half of the ring
+   184→  ctx.save();
+   185→  ctx.strokeStyle = hexA('#fde68a', 0.4);
+   186→  ctx.lineWidth = 5;
+   187→  ctx.beginPath();
+   188→  ctx.ellipse(x, y, rx, ry, rot, Math.PI, Math.PI * 2);
+   189→  ctx.stroke();
+   190→  ctx.strokeStyle = hexA('#fde68a', 0.18);
+   191→  ctx.lineWidth = 10;
+   192→  ctx.beginPath();
+   193→  ctx.ellipse(x, y, rx * 1.09, ry * 1.09, rot, Math.PI, Math.PI * 2);
+   194→  ctx.stroke();
+   195→  ctx.restore();
+   196→  drawSphere(ctx, x, y, r, color, lx, ly, 2, t);
+   197→  // front half of the ring
+   198→  ctx.save();
+   199→  ctx.strokeStyle = hexA('#fde68a', 0.75);
+   200→  ctx.lineWidth = 5;
+   201→  ctx.beginPath();
+   202→  ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI);
+   203→  ctx.stroke();
+   204→  ctx.strokeStyle = hexA('#fde68a', 0.3);
+   205→  ctx.lineWidth = 10;
+   206→  ctx.beginPath();
+   207→  ctx.ellipse(x, y, rx * 1.09, ry * 1.09, rot, 0, Math.PI);
+   208→  ctx.stroke();
+   209→  ctx.restore();
+   210→}
+   211→
+   212→function drawSun(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, t: number): void {
+   213→  // corona pulse
+   214→  const pulse = 1 + 0.07 * Math.sin(t * 2.1) + 0.03 * Math.sin(t * 5.3);
+   215→  const cg = ctx.createRadialGradient(x, y, r * 0.8, x, y, r * 2.05 * pulse);
+   216→  cg.addColorStop(0, 'rgba(253,224,71,0.32)');
+   217→  cg.addColorStop(0.55, 'rgba(245,158,11,0.14)');
+   218→  cg.addColorStop(1, 'rgba(245,158,11,0)');
+   219→  ctx.fillStyle = cg;
+   220→  ctx.beginPath();
+   221→  ctx.arc(x, y, r * 2.05 * pulse, 0, Math.PI * 2);
+   222→  ctx.fill();
+   223→  drawSphere(ctx, x, y, r, '#f59e0b', -0.3, -0.4, 0, t);
+   224→  // boiling surface arcs
+   225→  ctx.save();
+   226→  ctx.strokeStyle = 'rgba(255,244,200,0.35)';
+   227→  ctx.lineWidth = 2.4;
+   228→  for (let i = 0; i < 3; i++) {
+   229→    const a0 = t * (0.35 + i * 0.12) + i * 2.1;
+   230→    ctx.beginPath();
+   231→    ctx.arc(x, y, r * (0.55 + i * 0.15), a0, a0 + 2.1);
+   232→    ctx.stroke();
+   233→  }
+   234→  ctx.restore();
+   235→}
+   236→
+   237→function drawTarget(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, t: number): void {
+   238→  const p = 0.5 + 0.5 * Math.sin(t * 2.4);
+   239→  ctx.save();
+   240→  // outer rotating dashed ring
+   241→  ctx.setLineDash([14, 10]);
+   242→  ctx.lineDashOffset = -t * 26;
+   243→  ctx.strokeStyle = `rgba(251,191,36,${0.5 + 0.3 * p})`;
+   244→  ctx.lineWidth = 2.6;
+   245→  ctx.beginPath();
+   246→  ctx.arc(x, y, r, 0, Math.PI * 2);
+   247→  ctx.stroke();
+   248→  ctx.setLineDash([]);
+   249→  // inner ring
+   250→  ctx.strokeStyle = 'rgba(251,191,36,0.22)';
+   251→  ctx.lineWidth = 1.6;
+   252→  ctx.beginPath();
+   253→  ctx.arc(x, y, r * 0.62, 0, Math.PI * 2);
+   254→  ctx.stroke();
+   255→  // rotating compass ticks
+   256→  const ta = t * 0.6;
+   257→  ctx.strokeStyle = 'rgba(253,230,138,0.8)';
+   258→  ctx.lineWidth = 2.4;
+   259→  for (let i = 0; i < 4; i++) {
+   260→    const a = ta + (i * Math.PI) / 2;
+   261→    ctx.beginPath();
+   262→    ctx.moveTo(x + Math.cos(a) * (r - 9), y + Math.sin(a) * (r - 9));
+   263→    ctx.lineTo(x + Math.cos(a) * (r + 9), y + Math.sin(a) * (r + 9));
+   264→    ctx.stroke();
+   265→  }
+   266→  // core beacon
+   267→  ctx.shadowColor = 'rgba(251,191,36,0.9)';
+   268→  ctx.shadowBlur = 14 + 10 * p;
+   269→  ctx.fillStyle = `rgba(253,230,138,${0.75 + 0.25 * p})`;
+   270→  ctx.beginPath();
+   271→  ctx.arc(x, y, 6 + 2 * p, 0, Math.PI * 2);
+   272→  ctx.fill();
+   273→  ctx.restore();
+   274→}
+   275→
+   276→function drawPod(ctx: CanvasRenderingContext2D, x: number, y: number, i: number, t: number): void {
+   277→  const s = 10 * (1 + 0.16 * Math.sin(t * 3 + i * 1.7));
+   278→  ctx.save();
+   279→  ctx.translate(x, y);
+   280→  ctx.shadowColor = 'rgba(45,212,191,0.9)';
+   281→  ctx.shadowBlur = 12;
+   282→  ctx.fillStyle = 'rgba(45,212,191,0.92)';
+   283→  ctx.beginPath();
+   284→  for (let k = 0; k < 6; k++) {
+   285→    const a = (k * Math.PI) / 3 - Math.PI / 6 + t * 0.5;
+   286→    const px = Math.cos(a) * s;
+   287→    const py = Math.sin(a) * s;
+   288→    if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+   289→  }
+   290→  ctx.closePath();
+   291→  ctx.fill();
+   292→  ctx.shadowBlur = 0;
+   293→  ctx.fillStyle = 'rgba(240,253,250,0.95)';
+   294→  ctx.beginPath();
+   295→  ctx.arc(0, 0, s * 0.3, 0, Math.PI * 2);
+   296→  ctx.fill();
+   297→  ctx.restore();
+   298→}
+   299→
+   300→/* ============================================================ main canvas sub-component */
+   301→
+   302→function OrbitCanvas({ mission, label, onWin, onLose, onHud }: {
+   303→  mission: Mission;
+   304→  label: string;
+   305→  onWin: (pods: number, fuelLeft: number, time: number) => void;
+   306→  onLose: (reason: 'crash' | 'lost' | 'timeout') => void;
+   307→  onHud: (s: HudSnap) => void;
+   308→}) {
+   309→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   310→  const simRef = useRef<Sim>(initSim(mission));
+   311→  const viewRef = useRef({ cssW: 900 });
+   312→  const cbRef = useRef({ onWin, onLose, onHud });
+   313→  const stars = useMemo(() => makeStars(MISSIONS.indexOf(mission) + 3), [mission]);
+   314→
+   315→  useEffect(() => {
+   316→    cbRef.current = { onWin, onLose, onHud };
+   317→  }, [onWin, onLose, onHud]);
+   318→
+   319→  /* keep the backing store sized (device-pixel sharp) */
+   320→  useEffect(() => {
+   321→    const canvas = canvasRef.current;
+   322→    if (!canvas) return;
+   323→    const resize = () => {
+   324→      const w = canvas.clientWidth || 900;
+   325→      const dpr = Math.min(2, window.devicePixelRatio || 1);
+   326→      canvas.width = Math.round(w * dpr);
+   327→      canvas.height = Math.round(w * 0.75 * dpr);
+   328→      viewRef.current.cssW = w;
+   329→    };
+   330→    resize();
+   331→    const ro = new ResizeObserver(resize);
+   332→    ro.observe(canvas);
+   333→    return () => ro.disconnect();
+   334→  }, []);
+   335→
+   336→  /* physics + render loop */
+   337→  useEffect(() => {
+   338→    const canvas = canvasRef.current;
+   339→    if (!canvas) return;
+   340→    const ctx = canvas.getContext('2d');
+   341→    if (!ctx) return;
+   342→    const sun = mission.bodies.find((b) => b.kind === 'sun');
+   343→
+   344→    const burst = (x: number, y: number, c: string, n: number, speed: number) => {
+   345→      const s = simRef.current;
+   346→      for (let i = 0; i < n; i++) {
+   347→        const a = Math.random() * Math.PI * 2;
+   348→        const v = speed * (0.3 + Math.random() * 0.9);
+   349→        s.particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.7 + Math.random() * 0.7, max: 1.4, c, r: 1.5 + Math.random() * 2.5 });
+   350→      }
+   351→    };
+   352→
+   353→    const step = (dt: number) => {
+   354→      const s = simRef.current;
+   355→      if (s.phase !== 'flight') return;
+   356→      s.time += dt;
+   357→      s.thrustingNow = false;
+   358→      let tx = 0;
+   359→      let ty = 0;
+   360→      if (s.thrusting && s.fuel > 0) {
+   361→        const dx = s.aimX - s.x;
+   362→        const dy = s.aimY - s.y;
+   363→        const d = Math.hypot(dx, dy);
+   364→        if (d > 6) {
+   365→          tx = (dx / d) * THRUST_ACCEL;
+   366→          ty = (dy / d) * THRUST_ACCEL;
+   367→          s.fuel = Math.max(0, s.fuel - FUEL_BURN * dt);
+   368→          s.thrustingNow = true;
+   369→        }
+   370→      }
+   371→      stepProbe(s, mission.bodies, dt, tx, ty);
+   372→      const speed = Math.hypot(s.vx, s.vy);
+   373→      if (speed > 1) s.heading = Math.atan2(s.vy, s.vx);
+   374→      s.trailTick = (s.trailTick + 1) % 2;
+   375→      if (s.trailTick === 0) {
+   376→        s.trail.push({ x: s.x, y: s.y });
+   377→        if (s.trail.length > 120) s.trail.shift();
+   378→      }
+   379→      // science pods
+   380→      for (let i = 0; i < mission.pods.length; i++) {
+   381→        if (!s.pods[i] && Math.hypot(s.x - mission.pods[i].x, s.y - mission.pods[i].y) < POD_PICKUP) {
+   382→          s.pods[i] = true;
+   383→          burst(mission.pods[i].x, mission.pods[i].y, '#5eead4', 12, 60);
+   384→          sfx.coin();
+   385→        }
+   386→      }
+   387→      // win — capture radius
+   388→      if (Math.hypot(s.x - mission.target.x, s.y - mission.target.y) < mission.target.r) {
+   389→        s.phase = 'won';
+   390→        burst(s.x, s.y, '#fbbf24', 26, 90);
+   391→        sfx.win();
+   392→        cbRef.current.onWin(s.pods.filter(Boolean).length, s.fuel, s.time);
+   393→        return;
+   394→      }
+   395→      // crash into a surface
+   396→      if (hitsBody(s.x, s.y, mission.bodies)) {
+   397→        s.phase = 'crashed';
+   398→        s.shake = 1;
+   399→        burst(s.x, s.y, '#fb923c', 30, 120);
+   400→        sfx.bad();
+   401→        cbRef.current.onLose('crash');
+   402→        return;
+   403→      }
+   404→      // drifted out of bounds
+   405→      if (outOfBounds(s.x, s.y)) {
+   406→        s.phase = 'lost';
+   407→        sfx.lose();
+   408→        cbRef.current.onLose('lost');
+   409→        return;
+   410→      }
+   411→      // mission clock
+   412→      if (s.time >= TIME_LIMIT) {
+   413→        s.phase = 'timeout';
+   414→        sfx.lose();
+   415→        cbRef.current.onLose('timeout');
+   416→      }
+   417→    };
+   418→
+   419→    const draw = (t: number) => {
+   420→      const s = simRef.current;
+   421→      const cssW = viewRef.current.cssW;
+   422→      const px = WORLD.w / cssW; // css px → world units
+   423→      const dpr = canvas.width / Math.max(1, cssW);
+   424→      const scale = dpr * (cssW / WORLD.w);
+   425→      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+   426→      if (s.shake > 0) {
+   427→        s.shake = Math.max(0, s.shake - 0.03);
+   428→        ctx.translate((Math.random() - 0.5) * s.shake * 14, (Math.random() - 0.5) * s.shake * 14);
+   429→      }
+   430→      // deep space
+   431→      ctx.fillStyle = '#04070d';
+   432→      ctx.fillRect(-40, -40, WORLD.w + 80, WORLD.h + 80);
+   433→      for (const n of NEBULAS) {
+   434→        const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.r);
+   435→        g.addColorStop(0, `rgba(${n.c},${n.a})`);
+   436→        g.addColorStop(1, `rgba(${n.c},0)`);
+   437→        ctx.fillStyle = g;
+   438→        ctx.fillRect(n.x - n.r, n.y - n.r, n.r * 2, n.r * 2);
+   439→      }
+   440→      // starfield (2 layers, twinkle)
+   441→      for (const st of stars) {
+   442→        ctx.globalAlpha = st.base + 0.28 * Math.sin(t * st.sp + st.ph);
+   443→        ctx.fillStyle = '#e7f6f3';
+   444→        ctx.beginPath();
+   445→        ctx.arc(st.x, st.y, st.r, 0, Math.PI * 2);
+   446→        ctx.fill();
+   447→      }
+   448→      ctx.globalAlpha = 1;
+   449→      // board frame
+   450→      ctx.strokeStyle = 'rgba(94,234,212,0.14)';
+   451→      ctx.lineWidth = 2;
+   452→      ctx.setLineDash([10, 14]);
+   453→      ctx.strokeRect(2, 2, WORLD.w - 4, WORLD.h - 4);
+   454→      ctx.setLineDash([]);
+   455→      // target station
+   456→      drawTarget(ctx, mission.target.x, mission.target.y, mission.target.r, t);
+   457→      // pods
+   458→      for (let i = 0; i < mission.pods.length; i++) {
+   459→        if (!s.pods[i]) drawPod(ctx, mission.pods[i].x, mission.pods[i].y, i, t);
+   460→      }
+   461→      // bodies
+   462→      for (const b of mission.bodies) {
+   463→        if (b.kind === 'sun') {
+   464→          drawSun(ctx, b.x, b.y, b.r, t);
+   465→        } else if (b.ring) {
+   466→          if (sun) {
+   467→            const dx = sun.x - b.x;
+   468→            const dy = sun.y - b.y;
+   469→            const d = Math.hypot(dx, dy) || 1;
+   470→            drawRingedPlanet(ctx, b.x, b.y, b.r, b.color, dx / d, dy / d, t);
+   471→          } else drawRingedPlanet(ctx, b.x, b.y, b.r, b.color, -0.55, -0.6, t);
+   472→        } else {
+   473→          let lx = -0.55;
+   474→          let ly = -0.6;
+   475→          if (sun) {
+   476→            const dx = sun.x - b.x;
+   477→            const dy = sun.y - b.y;
+   478→            const d = Math.hypot(dx, dy) || 1;
+   479→            lx = dx / d; ly = dy / d;
+   480→          }
+   481→          drawSphere(ctx, b.x, b.y, b.r, b.color, lx, ly, b.kind === 'planet' ? 2 : 1, t);
+   482→        }
+   483→      }
+   484→      // prediction while aiming
+   485→      if (s.phase === 'aiming' && s.drag && s.prediction && s.prediction.pts.length > 2) {
+   486→        const pts = s.prediction.pts;
+   487→        const n = pts.length;
+   488→        ctx.save();
+   489→        ctx.lineWidth = 2.4;
+   490→        for (let i = 1; i < n; i++) {
+   491→          const f = i / n;
+   492→          ctx.globalAlpha = (1 - f) * 0.85 + 0.08;
+   493→          if (s.prediction.status === 'crash' && i > n - 8) ctx.strokeStyle = '#fb7185';
+   494→          else if (s.prediction.status === 'capture' && i > n * 0.82) ctx.strokeStyle = '#fbbf24';
+   495→          else ctx.strokeStyle = '#5eead4';
+   496→          ctx.beginPath();
+   497→          ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
+   498→          ctx.lineTo(pts[i].x, pts[i].y);
+   499→          ctx.stroke();
+   500→        }
+   501→        ctx.globalAlpha = 1;
+   502→        if (s.prediction.status === 'crash') {
+   503→          const h = pts[n - 1];
+   504→          ctx.strokeStyle = '#fb7185';
+   505→          ctx.lineWidth = 3;
+   506→          ctx.beginPath();
+   507→          ctx.moveTo(h.x - 7, h.y - 7); ctx.lineTo(h.x + 7, h.y + 7);
+   508→          ctx.moveTo(h.x + 7, h.y - 7); ctx.lineTo(h.x - 7, h.y + 7);
+   509→          ctx.stroke();
+   510→        }
+   511→        if (s.prediction.status === 'capture') {
+   512→          ctx.strokeStyle = '#fbbf24';
+   513→          ctx.lineWidth = 2;
+   514→          ctx.beginPath();
+   515→          ctx.arc(pts[n - 1].x, pts[n - 1].y, 12 + 4 * Math.sin(t * 6), 0, Math.PI * 2);
+   516→          ctx.stroke();
+   517→        }
+   518→        ctx.restore();
+   519→      }
+   520→      // trail (golden, fading)
+   521→      if (s.trail.length > 2) {
+   522→        for (let pass = 0; pass < 2; pass++) {
+   523→          for (let i = 1; i < s.trail.length; i++) {
+   524→            const f = i / s.trail.length;
+   525→            ctx.strokeStyle = `rgba(251,191,36,${(pass === 0 ? 0.16 : 0.4) * f})`;
+   526→            ctx.lineWidth = pass === 0 ? 5 * f + 1 : 1.6 * f + 0.5;
+   527→            ctx.beginPath();
+   528→            ctx.moveTo(s.trail[i - 1].x, s.trail[i - 1].y);
+   529→            ctx.lineTo(s.trail[i].x, s.trail[i].y);
+   530→            ctx.stroke();
+   531→          }
+   532→        }
+   533→      }
+   534→      // probe
+   535→      const pr = 15;
+   536→      // selection pulse while aiming
+   537→      if (s.phase === 'aiming') {
+   538→        ctx.strokeStyle = `rgba(94,234,212,${0.5 + 0.3 * Math.sin(t * 2.6)})`;
+   539→        ctx.lineWidth = 2;
+   540→        ctx.beginPath();
+   541→        ctx.arc(s.x, s.y, pr + 7 + 2.5 * Math.sin(t * 2.6), 0, Math.PI * 2);
+   542→        ctx.stroke();
+   543→      }
+   544→      ctx.save();
+   545→      ctx.translate(s.x, s.y);
+   546→      ctx.rotate(s.heading);
+   547→      if (s.thrustingNow) {
+   548→        const fl = 15 + Math.random() * 9;
+   549→        const fg = ctx.createLinearGradient(-8, 0, -8 - fl, 0);
+   550→        fg.addColorStop(0, 'rgba(253,224,71,0.95)');
+   551→        fg.addColorStop(0.6, 'rgba(245,158,11,0.55)');
+   552→        fg.addColorStop(1, 'rgba(245,158,11,0)');
+   553→        ctx.fillStyle = fg;
+   554→        ctx.beginPath();
+   555→        ctx.moveTo(-7, 4.5);
+   556→        ctx.lineTo(-8 - fl, 0);
+   557→        ctx.lineTo(-7, -4.5);
+   558→        ctx.closePath();
+   559→        ctx.fill();
+   560→      }
+   561→      ctx.shadowColor = 'rgba(251,191,36,0.8)';
+   562→      ctx.shadowBlur = 10;
+   563→      const pg = ctx.createLinearGradient(-8, 0, 11, 0);
+   564→      pg.addColorStop(0, '#f59e0b');
+   565→      pg.addColorStop(1, '#fffbeb');
+   566→      ctx.fillStyle = pg;
+   567→      ctx.beginPath();
+   568→      ctx.moveTo(11, 0);
+   569→      ctx.lineTo(-8, 7);
+   570→      ctx.lineTo(-4, 0);
+   571→      ctx.lineTo(-8, -7);
+   572→      ctx.closePath();
+   573→      ctx.fill();
+   574→      ctx.shadowBlur = 0;
+   575→      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+   576→      ctx.lineWidth = 1.1;
+   577→      ctx.stroke();
+   578→      ctx.restore();
+   579→      // aim arrow + power gauge + Δv label
+   580→      if (s.phase === 'aiming' && s.drag && s.dv > 0.5) {
+   581→        const L = Math.min(Math.hypot(s.drag.cx - s.drag.sx, s.drag.cy - s.drag.sy), MAX_DRAG);
+   582→        const a = Math.atan2(s.drag.cy - s.drag.sy, s.drag.cx - s.drag.sx);
+   583→        const ex = s.x + Math.cos(a) * L;
+   584→        const ey = s.y + Math.sin(a) * L;
+   585→        ctx.save();
+   586→        ctx.strokeStyle = '#fbbf24';
+   587→        ctx.lineWidth = 3;
+   588→        ctx.setLineDash([8, 7]);
+   589→        ctx.beginPath();
+   590→        ctx.moveTo(s.x, s.y);
+   591→        ctx.lineTo(ex, ey);
+   592→        ctx.stroke();
+   593→        ctx.setLineDash([]);
+   594→        ctx.beginPath();
+   595→        ctx.moveTo(ex + Math.cos(a) * 12, ey + Math.sin(a) * 12);
+   596→        ctx.lineTo(ex + Math.cos(a + 2.5) * 10, ey + Math.sin(a + 2.5) * 10);
+   597→        ctx.lineTo(ex + Math.cos(a - 2.5) * 10, ey + Math.sin(a - 2.5) * 10);
+   598→        ctx.closePath();
+   599→        ctx.fillStyle = '#fbbf24';
+   600→        ctx.fill();
+   601→        // power gauge arc around probe
+   602→        const frac = Math.min(1, s.dv / (MAX_DRAG * LAUNCH_SCALE));
+   603→        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+   604→        ctx.lineWidth = 4;
+   605→        ctx.beginPath();
+   606→        ctx.arc(s.x, s.y, pr + 13, 0, Math.PI * 2);
+   607→        ctx.stroke();
+   608→        ctx.strokeStyle = frac > 0.92 ? '#fb7185' : '#fbbf24';
+   609→        ctx.beginPath();
+   610→        ctx.arc(s.x, s.y, pr + 13, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+   611→        ctx.stroke();
+   612→        // Δv label
+   613→        const { locale } = useApp.getState();
+   614→        const label = `Δv ${localizeDigits(Math.round(s.dv), locale)}`;
+   615→        ctx.font = `bold ${Math.max(13, 15 * px)}px ui-sans-serif, system-ui, sans-serif`;
+   616→        const wTxt = ctx.measureText(label).width + 14;
+   617→        ctx.fillStyle = 'rgba(2,6,12,0.72)';
+   618→        ctx.beginPath();
+   619→        ctx.roundRect(ex + 12, ey - 12, wTxt, 24, 7);
+   620→        ctx.fill();
+   621→        ctx.fillStyle = '#fde68a';
+   622→        ctx.textBaseline = 'middle';
+   623→        ctx.fillText(label, ex + 19, ey);
+   624→        ctx.restore();
+   625→      }
+   626→      // particles
+   627→      for (const p of s.particles) {
+   628→        ctx.globalAlpha = Math.max(0, p.life / p.max);
+   629→        ctx.fillStyle = p.c;
+   630→        ctx.beginPath();
+   631→        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+   632→        ctx.fill();
+   633→      }
+   634→      ctx.globalAlpha = 1;
+   635→      // off-screen probe indicator
+   636→      if (s.phase === 'flight' && (s.x < 0 || s.x > WORLD.w || s.y < 0 || s.y > WORLD.h)) {
+   637→        const cx = Math.max(26, Math.min(WORLD.w - 26, s.x));
+   638→        const cy = Math.max(46, Math.min(WORLD.h - 60, s.y));
+   639→        const a = Math.atan2(s.y - cy, s.x - cx);
+   640→        ctx.save();
+   641→        ctx.translate(cx, cy);
+   642→        ctx.rotate(a);
+   643→        ctx.fillStyle = `rgba(251,191,36,${0.65 + 0.3 * Math.sin(t * 5)})`;
+   644→        ctx.beginPath();
+   645→        ctx.moveTo(14, 0);
+   646→        ctx.lineTo(-8, 8);
+   647→        ctx.lineTo(-8, -8);
+   648→        ctx.closePath();
+   649→        ctx.fill();
+   650→        ctx.restore();
+   651→        const { locale } = useApp.getState();
+   652→        const dist = localizeDigits(Math.round(Math.hypot(s.x - cx, s.y - cy)), locale);
+   653→        ctx.font = `bold ${Math.max(12, 13 * px)}px ui-sans-serif, system-ui, sans-serif`;
+   654→        ctx.fillStyle = 'rgba(253,230,138,0.9)';
+   655→        ctx.textBaseline = 'middle';
+   656→        ctx.fillText(dist, cx + 18, cy + 1);
+   657→      }
+   658→      // low-fuel edge pulse
+   659→      if (s.phase === 'flight' && s.fuel > 0 && s.fuel < mission.startFuel * 0.2) {
+   660→        ctx.strokeStyle = `rgba(244,63,94,${0.25 + 0.2 * Math.sin(t * 6)})`;
+   661→        ctx.lineWidth = 6;
+   662→        ctx.strokeRect(3, 3, WORLD.w - 6, WORLD.h - 6);
+   663→      }
+   664→      // vignette
+   665→      const vg = ctx.createRadialGradient(WORLD.w / 2, WORLD.h / 2, WORLD.h * 0.42, WORLD.w / 2, WORLD.h / 2, WORLD.h * 0.86);
+   666→      vg.addColorStop(0, 'rgba(2,6,12,0)');
+   667→      vg.addColorStop(1, 'rgba(2,6,12,0.55)');
+   668→      ctx.fillStyle = vg;
+   669→      ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+   670→    };
+   671→
+   672→    let raf = 0;
+   673→    let last = performance.now();
+   674→    let acc = 0;
+   675→    let hudAt = 0;
+   676→    const loop = (now: number) => {
+   677→      raf = requestAnimationFrame(loop);
+   678→      const dtReal = Math.min(0.1, (now - last) / 1000);
+   679→      last = now;
+   680→      acc += dtReal;
+   681→      while (acc >= DT) {
+   682→        step(DT);
+   683→        acc -= DT;
+   684→      }
+   685→      const s = simRef.current;
+   686→      if (s.phase === 'aiming' && s.drag) {
+   687→        const d = aimDelta(s);
+   688→        s.dv = d.dv;
+   689→        s.prediction = d.dv > 0.5 ? predictPath(s.x, s.y, d.vx, d.vy, mission.bodies, mission.target, PREDICT_STEPS) : null;
+   690→      } else if (s.phase === 'aiming') {
+   691→        s.dv = 0;
+   692→        s.prediction = null;
+   693→      }
+   694→      // particles advance on wall-clock (also animate after phase end)
+   695→      for (let i = s.particles.length - 1; i >= 0; i--) {
+   696→        const p = s.particles[i];
+   697→        p.life -= dtReal;
+   698→        p.x += p.vx * dtReal;
+   699→        p.y += p.vy * dtReal;
+   700→        p.vx *= 0.985;
+   701→        p.vy *= 0.985;
+   702→        if (p.life <= 0) s.particles.splice(i, 1);
+   703→      }
+   704→      draw(now / 1000);
+   705→      if (now - hudAt > 150) {
+   706→        hudAt = now;
+   707→        cbRef.current.onHud({
+   708→          phase: s.phase,
+   709→          fuel: s.fuel,
+   710→          fuelMax: mission.startFuel,
+   711→          pods: s.pods.filter(Boolean).length,
+   712→          podsTotal: mission.pods.length,
+   713→          timeLeft: Math.max(0, TIME_LIMIT - s.time),
+   714→          dv: s.dv,
+   715→          aiming: s.phase === 'aiming',
+   716→          thrusting: s.thrustingNow,
+   717→          coasting: s.phase === 'flight' && s.fuel <= 0,
+   718→        });
+   719→      }
+   720→    };
+   721→    raf = requestAnimationFrame(loop);
+   722→    return () => cancelAnimationFrame(raf);
+   723→  }, [mission, stars]);
+   724→
+   725→  /* pointer input — aiming (drag anywhere) & mid-flight burns */
+   726→  const getWorld = (e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } => {
+   727→    const rect = e.currentTarget.getBoundingClientRect();
+   728→    return { x: ((e.clientX - rect.left) / rect.width) * WORLD.w, y: ((e.clientY - rect.top) / rect.height) * WORLD.h };
+   729→  };
+   730→
+   731→  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   732→    const s = simRef.current;
+   733→    const p = getWorld(e);
+   734→    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* noop */ }
+   735→    if (s.phase === 'aiming') {
+   736→      s.drag = { sx: p.x, sy: p.y, cx: p.x, cy: p.y };
+   737→    } else if (s.phase === 'flight') {
+   738→      s.thrusting = true;
+   739→      s.aimX = p.x;
+   740→      s.aimY = p.y;
+   741→    }
+   742→  };
+   743→
+   744→  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   745→    const s = simRef.current;
+   746→    if (!s.drag && !s.thrusting) return;
+   747→    const p = getWorld(e);
+   748→    if (s.drag) {
+   749→      s.drag.cx = p.x;
+   750→      s.drag.cy = p.y;
+   751→    } else if (s.thrusting && s.phase === 'flight') {
+   752→      s.aimX = p.x;
+   753→      s.aimY = p.y;
+   754→    }
+   755→  };
+   756→
+   757→  const endPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   758→    const s = simRef.current;
+   759→    if (s.phase === 'aiming' && s.drag) {
+   760→      const d = aimDelta(s);
+   761→      if (d.dv < 1.2) { // tiny drag = cancel, no fuel spent
+   762→        s.drag = null;
+   763→        s.dv = 0;
+   764→        s.prediction = null;
+   765→        return;
+   766→      }
+   767→      s.vx = d.vx;
+   768→      s.vy = d.vy;
+   769→      s.fuel = Math.max(0, s.fuel - d.dv * LAUNCH_FUEL_PER_DV);
+   770→      s.heading = Math.atan2(d.vy, d.vx);
+   771→      s.drag = null;
+   772→      s.phase = 'flight';
+   773→      sfx.drop();
+   774→    } else if (s.thrusting) {
+   775→      s.thrusting = false;
+   776→      s.thrustingNow = false;
+   777→    }
+   778→    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+   779→  };
+   780→
+   781→  return (
+   782→    <canvas
+   783→      ref={canvasRef}
+   784→      className="block aspect-[4/3] w-full touch-none select-none"
+   785→      dir="ltr"
+   786→      onPointerDown={onPointerDown}
+   787→      onPointerMove={onPointerMove}
+   788→      onPointerUp={endPointer}
+   789→      onPointerCancel={endPointer}
+   790→      onContextMenu={(e) => e.preventDefault()}
+   791→      aria-label={label}
+   792→    />
+   793→  );
+   794→}
+   795→
+   796→/* ============================================================ main game component */
+   797→
+   798→interface RunResult {
+   799→  win: boolean;
+   800→  reason?: 'crash' | 'lost' | 'timeout';
+   801→  pods?: number;
+   802→  fuelLeft?: number;
+   803→  time?: number;
+   804→  score?: number;
+   805→  prevBest?: number;
+   806→}
+   807→
+   808→const emptyHud: HudSnap = {
+   809→  phase: 'aiming', fuel: 100, fuelMax: 100, pods: 0, podsTotal: 0,
+   810→  timeLeft: TIME_LIMIT, dv: 0, aiming: true, thrusting: false, coasting: false,
+   811→};
+   812→
+   813→/* progress: 'doi_orbit_mission' = highest unlocked index; 'doi_orbit_best' = per-mission bests.
+   814→   Lazy-loaded (client-only mount — the game opens after a user click, never SSR'd). */
+   815→function loadUnlocked(): number {
+   816→  if (typeof window === 'undefined') return 0;
+   817→  try {
+   818→    const u = Number(window.localStorage.getItem('doi_orbit_mission') ?? '0');
+   819→    if (Number.isFinite(u)) return Math.min(Math.max(0, Math.floor(u)), MISSIONS.length - 1);
+   820→  } catch { /* noop */ }
+   821→  return 0;
+   822→}
+   823→
+   824→function loadBests(): number[] {
+   825→  const empty = MISSIONS.map(() => 0);
+   826→  if (typeof window === 'undefined') return empty;
+   827→  try {
+   828→    const b = JSON.parse(window.localStorage.getItem('doi_orbit_best') ?? '[]');
+   829→    if (Array.isArray(b)) return MISSIONS.map((_, i) => (typeof b[i] === 'number' && b[i] > 0 ? b[i] : 0));
+   830→  } catch { /* noop */ }
+   831→  return empty;
+   832→}
+   833→
+   834→export function OrbitGame({ onExit }: { onExit: () => void }) {
+   835→  const { t, locale } = useApp();
+   836→  const { finish, rewards } = useArcadeFinish('orbit');
+   837→  const isRtl = locale === 'fa' || locale === 'ar';
+   838→  const [screen, setScreen] = useState<'select' | 'briefing' | 'play'>('select');
+   839→  const [missionIdx, setMissionIdx] = useState(0);
+   840→  const [attempt, setAttempt] = useState(0);
+   841→  const [unlocked, setUnlocked] = useState<number>(loadUnlocked);
+   842→  const [bests, setBests] = useState<number[]>(loadBests);
+   843→  const [codexOpen, setCodexOpen] = useState(false);
+   844→  const [hud, setHud] = useState<HudSnap>(emptyHud);
+   845→  const [result, setResult] = useState<RunResult | null>(null);
+   846→  const [dlgOpen, setDlgOpen] = useState(true);
+   847→
+   848→  const mission = MISSIONS[missionIdx];
+   849→  const completedCount = useMemo(() => bests.filter((b) => b > 0).length, [bests]);
+   850→  const campaignDone = bests[MISSIONS.length - 1] > 0;
+   851→
+   852→  const handleHud = useCallback((s: HudSnap) => setHud(s), []);
+   853→
+   854→  const handleWin = useCallback((pods: number, fuelLeft: number, time: number) => {
+   855→    const idx = missionIdx;
+   856→    const score = 100 + Math.round(fuelLeft * 2) + pods * 100;
+   857→    const prevBest = bests[idx] ?? 0;
+   858→    setResult({ win: true, pods, fuelLeft, time, score, prevBest });
+   859→    setDlgOpen(true);
+   860→    const nu = Math.max(unlocked, Math.min(idx + 1, MISSIONS.length - 1));
+   861→    if (nu !== unlocked) setUnlocked(nu);
+   862→    const nb = [...bests];
+   863→    if (score > prevBest) nb[idx] = score;
+   864→    setBests(nb);
+   865→    try {
+   866→      window.localStorage.setItem('doi_orbit_mission', String(nu));
+   867→      window.localStorage.setItem('doi_orbit_best', JSON.stringify(nb));
+   868→    } catch { /* noop */ }
+   869→    void finish(score, { mission: idx + 1, pods, fuelLeft: Math.round(fuelLeft), outcome: 'win' });
+   870→  }, [missionIdx, bests, unlocked, finish]);
+   871→
+   872→  const handleLose = useCallback((reason: 'crash' | 'lost' | 'timeout') => {
+   873→    setResult({ win: false, reason });
+   874→    setDlgOpen(true);
+   875→  }, []);
+   876→
+   877→  const startMission = (i: number) => {
+   878→    setMissionIdx(i);
+   879→    setScreen('briefing');
+   880→    setResult(null);
+   881→    setDlgOpen(true);
+   882→    setHud({ ...emptyHud, fuel: MISSIONS[i].startFuel, fuelMax: MISSIONS[i].startFuel, podsTotal: MISSIONS[i].pods.length });
+   883→  };
+   884→
+   885→  const restart = () => {
+   886→    sfx.click();
+   887→    setAttempt((a) => a + 1);
+   888→    setResult(null);
+   889→    setDlgOpen(true);
+   890→    setHud({ ...emptyHud, fuel: mission.startFuel, fuelMax: mission.startFuel, podsTotal: mission.pods.length });
+   891→  };
+   892→
+   893→  const nextMission = () => {
+   894→    sfx.click();
+   895→    if (missionIdx < MISSIONS.length - 1) startMission(missionIdx + 1);
+   896→    else { setScreen('select'); setResult(null); }
+   897→  };
+   898→
+   899→  const goPark = () => { sfx.click(); onExit(); };
+   900→
+   901→  const openSelect = () => { sfx.click(); setScreen('select'); setResult(null); };
+   902→
+   903→  const hudPct = Math.max(0, Math.min(100, (hud.fuel / Math.max(1, hud.fuelMax)) * 100));
+   904→  const fuelLow = hudPct < 20;
+   905→  const mm = Math.floor(hud.timeLeft / 60);
+   906→  const ss = Math.floor(hud.timeLeft % 60);
+   907→  const timeStr = `${mm}:${ss < 10 ? '0' : ''}${ss}`;
+   908→
+   909→  /* ---------------------------------------------------------- campaign map */
+   910→  if (screen === 'select') {
+   911→    return (
+   912→      <div dir={isRtl ? 'rtl' : 'ltr'} className="mx-auto w-full max-w-5xl px-3 py-5 sm:py-8">
+   913→        <div className="mb-5 flex flex-wrap items-center gap-2">
+   914→          <Button variant="outline" size="icon" className="h-11 w-11 shrink-0" onClick={goPark} aria-label={t('back_park')}>
+   915→            <ArrowLeft className="h-5 w-5 rtl:rotate-180" />
+   916→          </Button>
+   917→          <div className="min-w-0 flex-1">
+   918→            <h2 className="flex items-center gap-2 text-xl font-black gold-text sm:text-2xl">
+   919→              <span className="text-2xl">🛰️</span> {t('game_orbit')}
+   920→            </h2>
+   921→            <p className="truncate text-xs text-muted-foreground">{t('game_orbit_tag')}</p>
+   922→          </div>
+   923→          <Badge className="border-0 bg-amber-500/15 text-amber-300">📖 {t('campaign')}</Badge>
+   924→          <Button variant="outline" className="h-11 gap-1.5" onClick={() => { sfx.click(); setCodexOpen(true); }}>
+   925→            <BookOpen className="h-4 w-4" /> {t('codex')}
+   926→          </Button>
+   927→        </div>
+   928→
+   929→        {campaignDone && (
+   930→          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="mb-5 flex items-center gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+   931→            <Trophy className="h-6 w-6 shrink-0 text-amber-400" />
+   932→            <div>
+   933→              <p className="text-sm font-black text-amber-300">🏆 {t('orbit_win')}</p>
+   934→              <p className="text-xs leading-relaxed text-muted-foreground">{pick(FINALE, locale)}</p>
+   935→            </div>
+   936→          </motion.div>
+   937→        )}
+   938→
+   939→        <p className="mb-4 text-xs text-muted-foreground">
+   940→          {t('missions')}: <b className="text-amber-300">{localizeDigits(completedCount, locale)}</b> / {localizeDigits(MISSIONS.length, locale)}
+   941→        </p>
+   942→
+   943→        {([1, 2, 3] as const).map((act) => (
+   944→          <motion.section
+   945→            key={act}
+   946→            initial={{ opacity: 0, y: 10 }}
+   947→            animate={{ opacity: 1, y: 0 }}
+   948→            transition={{ delay: act * 0.07 }}
+   949→            className="mb-6"
+   950→            aria-label={pick(ACTS[act].name, locale)}
+   951→          >
+   952→            <div className="mb-2 flex items-baseline gap-2">
+   953→              <h3 className="text-sm font-black text-amber-300">{pick(ACTS[act].name, locale)}</h3>
+   954→              <span className="text-[11px] text-muted-foreground">— {pick(ACTS[act].sub, locale)}</span>
+   955→            </div>
+   956→            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+   957→              {MISSIONS.map((m, i) => {
+   958→                const lo = [0, 4, 9][act - 1];
+   959→                const hi = [3, 8, 11][act - 1];
+   960→                if (i < lo || i > hi) return null;
+   961→                const locked = i > unlocked;
+   962→                const done = bests[i] > 0;
+   963→                return (
+   964→                  <button
+   965→                    key={m.id}
+   966→                    type="button"
+   967→                    disabled={locked}
+   968→                    onClick={() => { if (locked) { sfx.bad(); toast.info(t('mission_locked')); } else { sfx.click(); startMission(i); } }}
+   969→                    className={`royal-card group relative rounded-2xl border p-4 text-start transition-transform ${locked ? 'cursor-not-allowed opacity-55' : 'cursor-pointer hover:-translate-y-0.5 hover:border-amber-500/40'}`}
+   970→                  >
+   971→                    <div className="flex items-center justify-between gap-2">
+   972→                      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/15 text-sm font-black text-amber-300">
+   973→                        {localizeDigits(i + 1, locale)}
+   974→                      </span>
+   975→                      {locked ? <Lock className="h-4 w-4 text-muted-foreground" />
+   976→                        : done ? <CheckCircle2 className="h-5 w-5 text-emerald-400" />
+   977→                        : <span className="text-[10px] font-bold text-muted-foreground">🪐 {localizeDigits(m.bodies.length, locale)} · 🔬 {localizeDigits(m.pods.length, locale)}</span>}
+   978→                    </div>
+   979→                    <h4 className="mt-2 text-sm font-black">{pick(m.name, locale)}</h4>
+   980→                    <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">
+   981→                      {locked ? t('mission_locked') : done ? `🏆 ${t('best_score')}: ${localizeDigits(bests[i], locale)}` : pick(ACTS[m.act].name, locale)}
+   982→                    </p>
+   983→                  </button>
+   984→                );
+   985→              })}
+   986→            </div>
+   987→          </motion.section>
+   988→        ))}
+   989→
+   990→        <CodexDialog open={codexOpen} onOpenChange={setCodexOpen} locale={locale} codexTitle={t('codex')} />
+   991→      </div>
+   992→    );
+   993→  }
+   994→
+   995→  /* ---------------------------------------------------------- briefing */
+   996→  if (screen === 'briefing') {
+   997→    return (
+   998→      <div dir={isRtl ? 'rtl' : 'ltr'} className="mx-auto w-full max-w-2xl px-3 py-5 sm:py-8">
+   999→        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="royal-card rounded-2xl border border-amber-500/20 p-5 sm:p-6">
+  1000→          <div className="flex items-center justify-between gap-2">
+  1001→            <Badge className="border-0 bg-amber-500/15 text-amber-300">
+  1002→              {t('mission')} {localizeDigits(missionIdx + 1, locale)} · {pick(ACTS[mission.act].name, locale)}
+  1003→            </Badge>
+  1004→            {bests[missionIdx] > 0 && <span className="text-[11px] text-muted-foreground">🏆 {localizeDigits(bests[missionIdx], locale)}</span>}
+  1005→          </div>
+  1006→          <h2 className="mt-3 text-2xl font-black gold-text">🛰️ {pick(mission.name, locale)}</h2>
+  1007→          <p className="mt-3 min-h-20 text-sm leading-7 text-muted-foreground">{pick(mission.briefing, locale)}</p>
+  1008→          <div className="mt-4 flex flex-wrap gap-2 text-xs">
+  1009→            <span className="flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/5 px-3 py-1.5"><Target className="h-3.5 w-3.5 text-amber-400" /> {t('orbit_target')}</span>
+  1010→            <span className="flex items-center gap-1.5 rounded-full border border-teal-500/20 bg-teal-500/5 px-3 py-1.5"><FlaskConical className="h-3.5 w-3.5 text-teal-400" /> {t('orbit_pods')} × {localizeDigits(mission.pods.length, locale)}</span>
+  1011→            <span className="flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/5 px-3 py-1.5"><Fuel className="h-3.5 w-3.5 text-amber-400" /> {t('arcade_fuel')} {localizeDigits(mission.startFuel, locale)}</span>
+  1012→            <span className="flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/5 px-3 py-1.5"><Timer className="h-3.5 w-3.5 text-amber-400" /> {localizeDigits(TIME_LIMIT, locale)}s</span>
+  1013→          </div>
+  1014→          <div className="mt-4 flex items-start gap-2 rounded-xl border border-teal-500/20 bg-teal-500/5 p-3 text-xs leading-relaxed text-teal-200/90">
+  1015→            <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-teal-300" />
+  1016→            <span>{pick(mission.hint, locale)}</span>
+  1017→          </div>
+  1018→          <div className="mt-5 flex flex-wrap gap-2">
+  1019→            <Button size="lg" className="glow-gold h-12 flex-1 text-base font-black" onClick={() => { sfx.click(); setScreen('play'); }}>
+  1020→              🚀 {t('arcade_launch')}
+  1021→            </Button>
+  1022→            <Button size="lg" variant="outline" className="h-12" onClick={openSelect}>{t('missions')}</Button>
+  1023→            <Button size="lg" variant="ghost" className="h-12" onClick={() => { sfx.click(); setCodexOpen(true); }} aria-label={t('codex')}>
+  1024→              <BookOpen className="h-5 w-5" />
+  1025→            </Button>
+  1026→          </div>
+  1027→        </motion.div>
+  1028→        <CodexDialog open={codexOpen} onOpenChange={setCodexOpen} locale={locale} codexTitle={t('codex')} />
+  1029→      </div>
+  1030→    );
+  1031→  }
+  1032→
+  1033→  /* ---------------------------------------------------------- play */
+  1034→  return (
+  1035→    <div dir={isRtl ? 'rtl' : 'ltr'} className="mx-auto w-full max-w-[900px] px-2 py-3 sm:px-3 sm:py-5">
+  1036→      <div className="relative overflow-hidden rounded-2xl border border-amber-500/25 bg-[#04070d] shadow-2xl shadow-black/40" dir="ltr">
+  1037→        <OrbitCanvas key={`${mission.id}-${attempt}`} mission={mission} label={`${pick(mission.name, locale)} — orbital mechanics canvas`} onWin={handleWin} onLose={handleLose} onHud={handleHud} />
+  1038→
+  1039→        {/* HUD — top */}
+  1040→        <div className="pointer-events-none absolute inset-x-2 top-2 z-10 flex flex-wrap items-center gap-1.5" dir={isRtl ? 'rtl' : 'ltr'}>
+  1041→          <span className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/50 px-3 py-1.5 text-[11px] font-bold text-amber-200 backdrop-blur-sm">
+  1042→            🛰️ {t('mission')} {localizeDigits(missionIdx + 1, locale)}
+  1043→          </span>
+  1044→          <span className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-bold backdrop-blur-sm ${fuelLow ? 'animate-pulse border-rose-400/50 text-rose-300' : 'border-white/10 text-amber-100'} bg-black/50`}>
+  1045→            {t('arcade_fuel')}
+  1046→            <Progress value={hudPct} className="h-2 w-16 sm:w-24 [&>div]:bg-gradient-to-r [&>div]:from-amber-300 [&>div]:to-amber-500" aria-label={t('arcade_fuel')} />
+  1047→            {localizeDigits(Math.round(hud.fuel), locale)}
+  1048→          </span>
+  1049→          <span className="flex items-center gap-1.5 rounded-full border border-white/10 bg-black/50 px-3 py-1.5 text-[11px] font-bold text-teal-200 backdrop-blur-sm">
+  1050→            🔬 {localizeDigits(hud.pods, locale)}/{localizeDigits(hud.podsTotal, locale)}
+  1051→          </span>
+  1052→          <span className={`flex items-center gap-1.5 rounded-full border border-white/10 bg-black/50 px-3 py-1.5 text-[11px] font-bold backdrop-blur-sm ${hud.timeLeft < 15 ? 'text-rose-300' : 'text-amber-100'}`}>
+  1053→            ⏱ {localizeDigits(timeStr, locale)}
+  1054→          </span>
+  1055→          {hud.aiming && (
+  1056→            <span className="rounded-full border border-teal-400/30 bg-black/50 px-3 py-1.5 text-[11px] text-teal-200 backdrop-blur-sm">
+  1057→              ✥ {pick(DRAG_HINT, locale)}
+  1058→            </span>
+  1059→          )}
+  1060→          {hud.thrusting && (
+  1061→            <span className="rounded-full border border-amber-400/40 bg-black/50 px-3 py-1.5 text-[11px] text-amber-200 backdrop-blur-sm">
+  1062→              🔥 {pick(BURN_HINT, locale)}
+  1063→            </span>
+  1064→          )}
+  1065→          {hud.coasting && (
+  1066→            <span className="rounded-full border border-white/15 bg-black/50 px-3 py-1.5 text-[11px] text-slate-300 backdrop-blur-sm">
+  1067→              💨 {pick(COAST_HINT, locale)}
+  1068→            </span>
+  1069→          )}
+  1070→        </div>
+  1071→
+  1072→        {/* HUD — bottom controls (≥44px targets) */}
+  1073→        <div className="absolute inset-x-2 bottom-2 z-10 flex items-center justify-between gap-2" dir={isRtl ? 'rtl' : 'ltr'}>
+  1074→          <div className="flex gap-2">
+  1075→            <Button variant="outline" size="icon" className="h-11 w-11 border-white/15 bg-black/50 text-amber-200 backdrop-blur-sm hover:bg-black/70" onClick={restart} aria-label={t('arcade_again')}>
+  1076→              <RotateCcw className="h-5 w-5" />
+  1077→            </Button>
+  1078→            <Button variant="outline" size="icon" className="h-11 w-11 border-white/15 bg-black/50 text-amber-200 backdrop-blur-sm hover:bg-black/70" onClick={() => { sfx.click(); setCodexOpen(true); }} aria-label={t('codex')}>
+  1079→              <BookOpen className="h-5 w-5" />
+  1080→            </Button>
+  1081→          </div>
+  1082→          <Button variant="outline" className="h-11 border-white/15 bg-black/50 px-4 text-amber-200 backdrop-blur-sm hover:bg-black/70" onClick={goPark}>
+  1083→            <ArrowLeft className="h-4 w-4 rtl:rotate-180" /> {t('back_park')}
+  1084→          </Button>
+  1085→        </div>
+  1086→
+  1087→        {/* floating CTA after the dialog was dismissed */}
+  1088→        {result && !dlgOpen && (
+  1089→          <div className="absolute inset-x-0 bottom-16 z-10 flex justify-center">
+  1090→            <Button className="glow-gold h-11 px-6 font-black" onClick={result.win ? nextMission : restart}>
+  1091→              {result.win ? (missionIdx < MISSIONS.length - 1 ? `🛰️ ${t('orbit_next')}` : `📖 ${t('missions')}`) : `↺ ${t('arcade_again')}`}
+  1092→            </Button>
+  1093→          </div>
+  1094→        )}
+  1095→
+  1096→        {/* victory panel */}
+  1097→        <Dialog open={!!result?.win && dlgOpen} onOpenChange={setDlgOpen}>
+  1098→          <DialogContent className="royal-card sm:max-w-sm" dir={isRtl ? 'rtl' : 'ltr'} aria-describedby={undefined}>
+  1099→            <DialogHeader>
+  1100→              <DialogTitle className="text-center text-xl font-black gold-text">
+  1101→                <span className="me-1 inline-block animate-pop">{missionIdx === MISSIONS.length - 1 ? '🏆' : '🛰️'}</span>{' '}
+  1102→                {missionIdx === MISSIONS.length - 1 ? t('orbit_win') : t('orbit_mission_complete')}
+  1103→              </DialogTitle>
+  1104→            </DialogHeader>
+  1105→            <p className="text-center text-sm font-bold text-amber-200">{pick(mission.name, locale)}</p>
+  1106→            {result?.win && missionIdx === MISSIONS.length - 1 && (
+  1107→              <p className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-3 text-center text-xs leading-relaxed text-amber-100/90">{pick(FINALE, locale)}</p>
+  1108→            )}
+  1109→            {result?.win && (
+  1110→              <>
+  1111→                <div className="space-y-1.5 py-1 text-sm">
+  1112→                  <Row label={`${t('score')}`} value={localizeDigits(100, locale)} delay={0} />
+  1113→                  <Row label={`🔬 ${t('orbit_pods')} × ${localizeDigits(result.pods ?? 0, locale)}`} value={localizeDigits((result.pods ?? 0) * 100, locale)} delay={0.05} />
+  1114→                  <Row label={`⛽ ${t('arcade_fuel')}`} value={localizeDigits(Math.round((result.fuelLeft ?? 0) * 2), locale)} delay={0.1} />
+  1115→                  <div className="my-1 border-t border-amber-500/20" />
+  1116→                  <div className="flex items-center justify-between">
+  1117→                    <span className="font-black text-amber-200">{t('score')}</span>
+  1118→                    <motion.span initial={{ scale: 0.6, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.16, type: 'spring', stiffness: 260, damping: 16 }} className="text-2xl font-black gold-text">
+  1119→                      {localizeDigits(result.score ?? 0, locale)}
+  1120→                    </motion.span>
+  1121→                  </div>
+  1122→                </div>
+  1123→                <div className="flex flex-wrap items-center justify-center gap-2 text-xs">
+  1124→                  {(result.score ?? 0) > (result.prevBest ?? 0) && (result.prevBest ?? 0) > 0 && (
+  1125→                    <Badge className="border-0 bg-emerald-500/15 text-emerald-300">✨ {pick(NEW_BEST, locale)}</Badge>
+  1126→                  )}
+  1127→                  {rewards && (
+  1128→                    <>
+  1129→                      <span className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 font-bold text-amber-400">+{localizeDigits(rewards.coins, locale)} 🪙</span>
+  1130→                      <span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 font-bold text-emerald-400">+{localizeDigits(rewards.xp, locale)} ✦</span>
+  1131→                    </>
+  1132→                  )}
+  1133→                </div>
+  1134→                <div className="flex gap-2 pt-1">
+  1135→                  {missionIdx < MISSIONS.length - 1 ? (
+  1136→                    <Button className="glow-gold flex-1" onClick={nextMission}>🛰️ {t('orbit_next')}</Button>
+  1137→                  ) : (
+  1138→                    <Button className="glow-gold flex-1" onClick={() => { sfx.click(); setScreen('select'); setResult(null); }}>📖 {t('missions')}</Button>
+  1139→                  )}
+  1140→                  <Button variant="outline" className="flex-1" onClick={restart}>{t('arcade_again')}</Button>
+  1141→                </div>
+  1142→              </>
+  1143→            )}
+  1144→          </DialogContent>
+  1145→        </Dialog>
+  1146→
+  1147→        {/* defeat panel */}
+  1148→        <Dialog open={!!result && !result.win && dlgOpen} onOpenChange={setDlgOpen}>
+  1149→          <DialogContent className="royal-card sm:max-w-sm" dir={isRtl ? 'rtl' : 'ltr'} aria-describedby={undefined}>
+  1150→            <DialogHeader>
+  1151→              <DialogTitle className="text-center text-xl font-black text-rose-300">
+  1152→                <span className="me-1 inline-block animate-pop">{result?.reason === 'crash' ? '💥' : '🌌'}</span>
+  1153→                {result?.reason === 'crash' ? t('orbit_crash') : t('orbit_lost')}
+  1154→              </DialogTitle>
+  1155→            </DialogHeader>
+  1156→            <p className="text-center text-xs text-muted-foreground">{pick(mission.name, locale)} · 🔬 {localizeDigits(hud.pods, locale)}/{localizeDigits(hud.podsTotal, locale)}</p>
+  1157→            <div className="flex items-start gap-2 rounded-xl border border-teal-500/20 bg-teal-500/5 p-3 text-xs leading-relaxed text-teal-200/90">
+  1158→              <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-teal-300" />
+  1159→              <span>{pick(mission.hint, locale)}</span>
+  1160→            </div>
+  1161→            <p className="text-center text-[11px] text-muted-foreground">{pick(TRY_AGAIN_TIP, locale)}</p>
+  1162→            <div className="flex gap-2">
+  1163→              <Button className="glow-gold flex-1" onClick={restart}>↺ {t('arcade_again')}</Button>
+  1164→              <Button variant="outline" className="flex-1" onClick={goPark}>{t('back_park')}</Button>
+  1165→            </div>
+  1166→          </DialogContent>
+  1167→        </Dialog>
+  1168→      </div>
+  1169→
+  1170→      <CodexDialog open={codexOpen} onOpenChange={setCodexOpen} locale={locale} codexTitle={t('codex')} />
+  1171→    </div>
+  1172→  );
+  1173→}
+  1174→
+  1175→/* ============================================================ small pieces */
+  1176→
+  1177→function Row({ label, value, delay }: { label: string; value: string; delay: number }) {
+  1178→  return (
+  1179→    <motion.div initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay }} className="flex items-center justify-between">
+  1180→      <span className="text-muted-foreground">{label}</span>
+  1181→      <span className="font-bold text-amber-100">{value}</span>
+  1182→    </motion.div>
+  1183→  );
+  1184→}
+  1185→
+  1186→function CodexDialog({ open, onOpenChange, locale, codexTitle }: { open: boolean; onOpenChange: (o: boolean) => void; locale: string; codexTitle: string }) {
+  1187→  return (
+  1188→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1189→      <DialogContent className="royal-card nice-scroll max-h-[85vh] overflow-y-auto sm:max-w-lg" dir={locale === 'fa' || locale === 'ar' ? 'rtl' : 'ltr'} aria-describedby={undefined}>
+  1190→        <DialogHeader>
+  1191→          <DialogTitle className="font-black gold-text">📖 {codexTitle}</DialogTitle>
+  1192→        </DialogHeader>
+  1193→        <div className="space-y-2.5">
+  1194→          {CODEX.map((c, i) => (
+  1195→            <motion.div
+  1196→              key={c.id}
+  1197→              initial={{ opacity: 0, y: 6 }}
+  1198→              animate={{ opacity: 1, y: 0 }}
+  1199→              transition={{ delay: i * 0.05 }}
+  1200→              className="rounded-xl border border-amber-500/15 bg-amber-500/5 p-3"
+  1201→            >
+  1202→              <div className="flex items-center gap-2 text-sm font-black text-amber-300">
+  1203→                <span className="text-base">{c.icon === 'ellipse' ? '🛰️' : c.icon}</span> {pick(c.title, locale)}
+  1204→              </div>
+  1205→              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{pick(c.text, locale)}</p>
+  1206→            </motion.div>
+  1207→          ))}
+  1208→          <p className="pt-1 text-center text-[10px] text-muted-foreground">Newton 1687 · Hohmann 1925 · Oberth 1929 · Voyager GRA 1979</p>
+  1209→        </div>
+  1210→      </DialogContent>
+  1211→    </Dialog>
+  1212→  );
+  1213→}
+  1214→

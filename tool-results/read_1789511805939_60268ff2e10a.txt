@@ -1,0 +1,1523 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * AdminView — "Duel of Ideas" admin dashboard (task 12-b).
+     5→     5→ * Tabs: Overview (stats + recharts + economy), Users (search/ban/coins/roles),
+     6→     6→ * Reports (moderation queue), Content (word filter + announcements),
+     7→     7→ * Store (price/active tuning), Chat logs (flagged messages).
+     8→     8→ * Persian-first / RTL-aware; bilingual inline labels for admin-only strings.
+     9→     9→ */
+    10→    10→import { useEffect, useState, useCallback } from 'react';
+    11→    11→import type { ReactNode } from 'react';
+    12→    12→import { useApp } from '@/store/app';
+    13→    13→import { api } from '@/lib/api';
+    14→    14→import { localizeDigits } from '@/lib/i18n';
+    15→    15→import type { TKey } from '@/lib/i18n';
+    16→    16→import { toast } from 'sonner';
+    17→    17→import { Button } from '@/components/ui/button';
+    18→    18→import { Badge } from '@/components/ui/badge';
+    19→    19→import { Input } from '@/components/ui/input';
+    20→    20→import { Switch } from '@/components/ui/switch';
+    21→    21→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    22→    22→import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+    23→    23→import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    24→    24→import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+    25→    25→import { Progress } from '@/components/ui/progress';
+    26→    26→import {
+    27→    27→  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+    28→    28→  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    29→    29→} from '@/components/ui/alert-dialog';
+    30→    30→import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+    31→    31→import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+    32→    32→import {
+    33→    33→  ResponsiveContainer, LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+    34→    34→} from 'recharts';
+    35→    35→import {
+    36→    36→  Shield, Users, Activity, Swords, Gamepad2, Flag, Wifi, Ban, Ghost, Coins, Megaphone, Zap,
+    37→    37→  Search, MoreVertical, ChevronLeft, ChevronRight, ShieldCheck, ShieldOff, UserCheck,
+    38→    38→  Filter, MessageSquare, ShoppingBag, Check, X, Trash2, Plus, Download, Eye,
+    39→    39→} from 'lucide-react';
+    40→    40→
+    41→    41→/* ---------------------------------- types --------------------------------- */
+    42→    42→
+    43→    43→interface StatsDTO {
+    44→    44→  cards: {
+    45→    45→    totalUsers: number; activeToday: number; totalGames: number; gamesToday: number;
+    46→    46→    openReports: number; guests: number; bannedUsers: number; onlineNow: number;
+    47→    47→  };
+    48→    48→  charts: {
+    49→    49→    gamesPerDay: { date: string; count: number }[];
+    50→    50→    winTypes: Record<string, number>;
+    51→    51→    modeDist: Record<string, number>;
+    52→    52→    firstMove: number[];
+    53→    53→    avgMoves: number;
+    54→    54→  };
+    55→    55→  economy: {
+    56→    56→    purchases: number; coinsMinted: number; coinsSpent: number;
+    57→    57→    topItems: { code: string; category: string; sales: number; price: number }[];
+    58→    58→  };
+    59→    59→}
+    60→    60→
+    61→    61→interface AdminUser {
+    62→    62→  id: string; username: string; role: string; isGuest: boolean;
+    63→    63→  banned: boolean; banReason: string | null; bannedUntil: string | null;
+    64→    64→  coins: number; level: number; rating: number; gamesPlayed: number;
+    65→    65→  createdAt: string; lastSeen: string | null; banCount: number;
+    66→    66→}
+    67→    67→interface UsersDTO { users: AdminUser[]; total: number; page: number }
+    68→    68→
+    69→    69→interface AdminReport {
+    70→    70→  id: string; targetName: string; reason: string; details: string; chatExcerpt: string;
+    71→    71→  status: string; createdAt: string;
+    72→    72→  reporter?: { username: string } | null;
+    73→    73→  target?: { username: string; banned: boolean; banCount: number } | null;
+    74→    74→}
+    75→    75→
+    76→    76→interface BannedWordRow { id: string; word: string; severity: number }
+    77→    77→interface AnnouncementRow {
+    78→    78→  id: string; titleFa: string; titleEn: string; titleAr: string; titleTr: string;
+    79→    79→  bodyFa: string; bodyEn: string; bodyAr: string; bodyTr: string;
+    80→    80→  kind: string; active: boolean; createdAt: string;
+    81→    81→}
+    82→    82→interface ItemRow {
+    83→    83→  code: string; category: string; rarity: string; price: number;
+    84→    84→  active: boolean; purchasedBy: number;
+    85→    85→}
+    86→    86→interface ChatRow {
+    87→    87→  id: string; roomId: string; senderName: string; text: string;
+    88→    88→  masked: boolean; flaggedWords: string; createdAt: string;
+    89→    89→  sender?: { username: string; banned: boolean } | null;
+    90→    90→}
+    91→    91→
+    92→    92→/* -------------------------------- helpers --------------------------------- */
+    93→    93→
+    94→    94→/** Small data-fetching hook with refresh + loading + error toast.
+    95→    95→ *  `loading` is derived from the last *completed* request (url+tick identity),
+    96→    96→ *  so no setState is needed synchronously inside the effect. */
+    97→    97→function useAdminData<T>(url: string) {
+    98→    98→  const t = useApp((s) => s.t);
+    99→    99→  const [done, setDone] = useState<{ url: string; tick: number; data: T | null } | null>(null);
+   100→   100→  const [tick, setTick] = useState(0);
+   101→   101→
+   102→   102→  useEffect(() => {
+   103→   103→    let alive = true;
+   104→   104→    api.get<T>(url)
+   105→   105→      .then((d) => { if (alive) setDone({ url, tick, data: d }); })
+   106→   106→      .catch(() => {
+   107→   107→        if (alive) {
+   108→   108→          setDone({ url, tick, data: null });
+   109→   109→          toast.error(t('error'));
+   110→   110→        }
+   111→   111→      });
+   112→   112→    return () => { alive = false; };
+   113→   113→  }, [url, tick, t]);
+   114→   114→
+   115→   115→  const current = done !== null && done.url === url && done.tick === tick;
+   116→   116→  return {
+   117→   117→    data: current ? done.data : null,
+   118→   118→    loading: !current,
+   119→   119→    refresh: () => setTick((x) => x + 1),
+   120→   120→    /** optimistic in-place patch of the current dataset */
+   121→   121→    patch: (fn: (d: T) => T) =>
+   122→   122→      setDone((s) => (s !== null && s.url === url && s.data !== null ? { ...s, data: fn(s.data) } : s)),
+   123→   123→  };
+   124→   124→}
+   125→   125→
+   126→   126→function fmtDate(iso: string | null | undefined, locale: string): string {
+   127→   127→  if (!iso) return '—';
+   128→   128→  const d = new Date(iso);
+   129→   129→  if (Number.isNaN(d.getTime())) return '—';
+   130→   130→  return d.toLocaleDateString(locale);
+   131→   131→}
+   132→   132→
+   133→   133→function fmtDateTime(iso: string | null | undefined, locale: string): string {
+   134→   134→  if (!iso) return '—';
+   135→   135→  const d = new Date(iso);
+   136→   136→  if (Number.isNaN(d.getTime())) return '—';
+   137→   137→  return d.toLocaleString(locale);
+   138→   138→}
+   139→   139→
+   140→   140→function apiErrMsg(e: unknown, t: (k: TKey) => string): string {
+   141→   141→  const code = (e as Error)?.message ?? '';
+   142→   142→  if (code === 'ADMIN_TARGET') return 'این هدف یک مدیر است · Target is an admin';
+   143→   143→  if (code === 'SELF') return 'این عمل روی خودتان ممکن نیست · Cannot target yourself';
+   144→   144→  if (code === 'RATE') return 'سرعت اقدامات زیاد است · Too many actions, slow down';
+   145→   145→  if (code === 'FORBIDDEN') return t('admin_only');
+   146→   146→  return t('error');
+   147→   147→}
+   148→   148→
+   149→   149→const short = (s: string, n = 14) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+   150→   150→
+   151→   151→function winLabel(k: string, t: (key: TKey) => string): string {
+   152→   152→  switch (k) {
+   153→   153→    case 'KIND': return t('win_kind').replace(/!/g, '');
+   154→   154→    case 'RUN': return t('win_run').replace(/!/g, '');
+   155→   155→    case 'FULL': return t('draw_full').split('—')[0]?.trim() ?? 'FULL';
+   156→   156→    case 'RESIGN': return t('resign');
+   157→   157→    case 'TIMEOUT': return 'وقت تمام · Timeout';
+   158→   158→    default: return k;
+   159→   159→  }
+   160→   160→}
+   161→   161→
+   162→   162→function modeLabel(k: string): string {
+   163→   163→  switch (k) {
+   164→   164→    case 'PVE': return 'با ربات · vs AI';
+   165→   165→    case 'LOCAL_PVP': return 'دو نفره · Local';
+   166→   166→    case 'ONLINE': return 'آنلاین · Online';
+   167→   167→    default: return k;
+   168→   168→  }
+   169→   169→}
+   170→   170→
+   171→   171→const TOOLTIP_STYLE = {
+   172→   172→  background: 'rgba(24,14,46,.96)',
+   173→   173→  border: '1px solid rgba(251,191,36,.3)',
+   174→   174→  borderRadius: 12,
+   175→   175→  fontSize: 12,
+   176→   176→  color: '#f8fafc',
+   177→   177→} as const;
+   178→   178→
+   179→   179→const SEV_STYLE: Record<number, string> = {
+   180→   180→  1: 'border-sky-400/40 bg-sky-500/10 text-sky-300',
+   181→   181→  2: 'border-amber-400/40 bg-amber-500/10 text-amber-300',
+   182→   182→  3: 'border-rose-400/40 bg-rose-500/10 text-rose-300',
+   183→   183→};
+   184→   184→
+   185→   185→const RARITY_STYLE: Record<string, string> = {
+   186→   186→  COMMON: 'border-slate-400/40 bg-slate-500/15 text-slate-300',
+   187→   187→  RARE: 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300',
+   188→   188→  EPIC: 'border-purple-400/40 bg-purple-500/15 text-purple-300',
+   189→   189→  LEGENDARY: 'border-amber-400/40 bg-amber-500/15 text-amber-300',
+   190→   190→};
+   191→   191→
+   192→   192→const STATUS_STYLE: Record<string, string> = {
+   193→   193→  OPEN: 'border-rose-400/40 bg-rose-500/15 text-rose-300',
+   194→   194→  ACTIONED: 'border-emerald-400/40 bg-emerald-500/15 text-emerald-300',
+   195→   195→  DISMISSED: 'border-slate-400/40 bg-slate-500/15 text-slate-300',
+   196→   196→};
+   197→   197→
+   198→   198→const KIND_STYLE: Record<string, string> = {
+   199→   199→  INFO: 'border-sky-400/40 bg-sky-500/10 text-sky-300',
+   200→   200→  EVENT: 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300',
+   201→   201→  WARNING: 'border-amber-400/40 bg-amber-500/10 text-amber-300',
+   202→   202→};
+   203→   203→const KIND_LABEL: Record<string, string> = {
+   204→   204→  INFO: 'اطلاع · Info',
+   205→   205→  EVENT: 'رویداد · Event',
+   206→   206→  WARNING: 'هشدار · Warning',
+   207→   207→};
+   208→   208→
+   209→   209→/* ------------------------------ tiny building blocks ----------------------- */
+   210→   210→
+   211→   211→function EmptyHint({ children }: { children: ReactNode }) {
+   212→   212→  return (
+   213→   213→    <div className="rounded-2xl border border-dashed border-white/10 py-10 text-center text-sm text-muted-foreground">
+   214→   214→      {children}
+   215→   215→    </div>
+   216→   216→  );
+   217→   217→}
+   218→   218→
+   219→   219→function ListSkeleton({ rows = 5 }: { rows?: number }) {
+   220→   220→  return (
+   221→   221→    <div className="space-y-2">
+   222→   222→      {Array.from({ length: rows }).map((_, i) => (
+   223→   223→        <div key={i} className="h-14 animate-pulse rounded-2xl bg-white/5" style={{ opacity: 1 - i * 0.12 }} />
+   224→   224→      ))}
+   225→   225→    </div>
+   226→   226→  );
+   227→   227→}
+   228→   228→
+   229→   229→function ChartCard({ title, extra, wide, children }: { title: string; extra?: ReactNode; wide?: boolean; children: ReactNode }) {
+   230→   230→  return (
+   231→   231→    <div className={`royal-card rounded-2xl p-4 ${wide ? 'lg:col-span-2' : ''}`}>
+   232→   232→      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+   233→   233→        <h3 className="text-sm font-black">{title}</h3>
+   234→   234→        {extra}
+   235→   235→      </div>
+   236→   236→      <div className="h-56 w-full">{children}</div>
+   237→   237→    </div>
+   238→   238→  );
+   239→   239→}
+   240→   240→
+   241→   241→/* --------------------------------- Overview -------------------------------- */
+   242→   242→
+   243→   243→function OverviewTab() {
+   244→   244→  const { t, locale } = useApp();
+   245→   245→  const { data, loading } = useAdminData<StatsDTO>('/api/admin/stats');
+   246→   246→  const rtl = locale === 'fa' || locale === 'ar';
+   247→   247→  const fmt = (n: number) => localizeDigits(n, locale);
+   248→   248→
+   249→   249→  if (!data) {
+   250→   250→    return loading ? (
+   251→   251→      <div>
+   252→   252→        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   253→   253→          {Array.from({ length: 8 }).map((_, i) => <div key={i} className="h-[76px] animate-pulse rounded-2xl bg-white/5" />)}
+   254→   254→        </div>
+   255→   255→        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+   256→   256→          {Array.from({ length: 4 }).map((_, i) => <div key={i} className="h-72 animate-pulse rounded-2xl bg-white/5" />)}
+   257→   257→        </div>
+   258→   258→      </div>
+   259→   259→    ) : (
+   260→   260→      <EmptyHint>داده‌ای یافت نشد · No data available</EmptyHint>
+   261→   261→    );
+   262→   262→  }
+   263→   263→
+   264→   264→  const c = data.cards;
+   265→   265→  const ch = data.charts;
+   266→   266→  const ec = data.economy;
+   267→   267→
+   268→   268→  const statCards: { label: string; value: number; icon: ReactNode }[] = [
+   269→   269→    { label: t('total_users'), value: c.totalUsers, icon: <Users className="h-5 w-5 text-amber-400" /> },
+   270→   270→    { label: t('active_today'), value: c.activeToday, icon: <Activity className="h-5 w-5 text-emerald-400" /> },
+   271→   271→    { label: t('games_today'), value: c.gamesToday, icon: <Swords className="h-5 w-5 text-sky-400" /> },
+   272→   272→    { label: t('total_games'), value: c.totalGames, icon: <Gamepad2 className="h-5 w-5 text-violet-400" /> },
+   273→   273→    { label: t('open_reports'), value: c.openReports, icon: <Flag className="h-5 w-5 text-rose-400" /> },
+   274→   274→    { label: t('online_now'), value: c.onlineNow, icon: <Wifi className="h-5 w-5 text-green-400" /> },
+   275→   275→    { label: 'مسدودشده‌ها · Banned', value: c.bannedUsers, icon: <Ban className="h-5 w-5 text-rose-300" /> },
+   276→   276→    { label: 'مهمان‌ها · Guests', value: c.guests, icon: <Ghost className="h-5 w-5 text-fuchsia-400" /> },
+   277→   277→  ];
+   278→   278→
+   279→   279→  const winData = Object.entries(ch.winTypes).map(([k, v]) => ({ key: k, count: v, label: short(winLabel(k, t)) }));
+   280→   280→  const modeData = Object.entries(ch.modeDist).map(([k, v]) => ({ key: k, count: v, label: short(modeLabel(k)) }));
+   281→   281→  const fmData = ch.firstMove.map((count, col) => ({ col: localizeDigits(col, locale), count }));
+   282→   282→  const dayData = ch.gamesPerDay.map((p) => ({ ...p, day: p.date.slice(5) }));
+   283→   283→
+   284→   284→  const axisTick = { fontSize: 10, fill: '#94a3b8' };
+   285→   285→  const tooltipFmt = (v: unknown) => localizeDigits(Number(v), locale);
+   286→   286→
+   287→   287→  return (
+   288→   288→    <div className="space-y-4">
+   289→   289→      {/* stat cards */}
+   290→   290→      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   291→   291→        {statCards.map((s) => (
+   292→   292→          <div key={s.label} className="royal-card flex items-center gap-3 rounded-2xl p-3.5">
+   293→   293→            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white/5">{s.icon}</div>
+   294→   294→            <div className="min-w-0">
+   295→   295→              <div className="truncate text-[11px] leading-tight text-muted-foreground">{s.label}</div>
+   296→   296→              <div className="text-xl font-black gold-text">{fmt(s.value)}</div>
+   297→   297→            </div>
+   298→   298→          </div>
+   299→   299→        ))}
+   300→   300→      </div>
+   301→   301→
+   302→   302→      {/* CSV exports */}
+   303→   303→      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-sky-500/25 bg-sky-500/5 px-3 py-2.5">
+   304→   304→        <Download className="h-4 w-4 text-sky-300" aria-hidden />
+   305→   305→        <span className="text-xs font-black text-sky-200">{t('admin_export')}</span>
+   306→   306→        <div className="ms-auto flex gap-2">
+   307→   307→          <a
+   308→   308→            href="/api/admin/export?type=users"
+   309→   309→            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-[11px] font-black text-sky-200 transition-colors hover:bg-sky-500/20"
+   310→   310→          >
+   311→   311→            <Users className="h-3.5 w-3.5" /> {t('admin_users')}.csv
+   312→   312→          </a>
+   313→   313→          <a
+   314→   314→            href="/api/admin/export?type=games"
+   315→   315→            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-[11px] font-black text-sky-200 transition-colors hover:bg-sky-500/20"
+   316→   316→          >
+   317→   317→            <Swords className="h-3.5 w-3.5" /> {t('total_games')}.csv
+   318→   318→          </a>
+   319→   319→        </div>
+   320→   320→      </div>
+   321→   321→
+   322→   322→      {/* charts */}
+   323→   323→      <div className="grid gap-4 lg:grid-cols-2">
+   324→   324→        <ChartCard
+   325→   325→          title={t('chart_games')}
+   326→   326→          wide
+   327→   327→          extra={<Badge variant="outline" className="border-amber-400/30 bg-amber-400/10 text-[10px] text-amber-300">{t('avg_moves')}: {fmt(ch.avgMoves)}</Badge>}
+   328→   328→        >
+   329→   329→          <ResponsiveContainer width="100%" height="100%">
+   330→   330→            <LineChart data={dayData} margin={{ top: 6, left: 4, right: 4, bottom: 0 }}>
+   331→   331→              <CartesianGrid stroke="rgba(255,255,255,.07)" strokeDasharray="3 3" />
+   332→   332→              <XAxis dataKey="day" reversed={rtl} tick={axisTick} tickLine={false} axisLine={false} />
+   333→   333→              <YAxis orientation={rtl ? 'right' : 'left'} width={32} allowDecimals={false} tick={axisTick} tickLine={false} axisLine={false} tickFormatter={(v) => localizeDigits(Number(v), locale)} />
+   334→   334→              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={tooltipFmt} />
+   335→   335→              <Line type="monotone" dataKey="count" name={t('chart_games')} stroke="#fbbf24" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+   336→   336→            </LineChart>
+   337→   337→          </ResponsiveContainer>
+   338→   338→        </ChartCard>
+   339→   339→
+   340→   340→        <ChartCard title={t('chart_wintype')}>
+   341→   341→          <ResponsiveContainer width="100%" height="100%">
+   342→   342→            <BarChart data={winData} margin={{ top: 6, left: 4, right: 4, bottom: 0 }}>
+   343→   343→              <CartesianGrid stroke="rgba(255,255,255,.07)" strokeDasharray="3 3" />
+   344→   344→              <XAxis dataKey="label" reversed={rtl} interval={0} tick={{ fontSize: 9, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+   345→   345→              <YAxis orientation={rtl ? 'right' : 'left'} width={32} allowDecimals={false} tick={axisTick} tickLine={false} axisLine={false} tickFormatter={(v) => localizeDigits(Number(v), locale)} />
+   346→   346→              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={tooltipFmt} />
+   347→   347→              <Bar dataKey="count" name={t('chart_wintype')} fill="#a78bfa" radius={[4, 4, 0, 0]} maxBarSize={42} />
+   348→   348→            </BarChart>
+   349→   349→          </ResponsiveContainer>
+   350→   350→        </ChartCard>
+   351→   351→
+   352→   352→        <ChartCard title={t('chart_modes')}>
+   353→   353→          <ResponsiveContainer width="100%" height="100%">
+   354→   354→            <BarChart data={modeData} margin={{ top: 6, left: 4, right: 4, bottom: 0 }}>
+   355→   355→              <CartesianGrid stroke="rgba(255,255,255,.07)" strokeDasharray="3 3" />
+   356→   356→              <XAxis dataKey="label" reversed={rtl} interval={0} tick={{ fontSize: 9, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+   357→   357→              <YAxis orientation={rtl ? 'right' : 'left'} width={32} allowDecimals={false} tick={axisTick} tickLine={false} axisLine={false} tickFormatter={(v) => localizeDigits(Number(v), locale)} />
+   358→   358→              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={tooltipFmt} />
+   359→   359→              <Bar dataKey="count" name={t('chart_modes')} fill="#34d399" radius={[4, 4, 0, 0]} maxBarSize={56} />
+   360→   360→            </BarChart>
+   361→   361→          </ResponsiveContainer>
+   362→   362→        </ChartCard>
+   363→   363→
+   364→   364→        <ChartCard title={t('chart_firstmove')} wide>
+   365→   365→          <ResponsiveContainer width="100%" height="100%">
+   366→   366→            <BarChart data={fmData} margin={{ top: 6, left: 4, right: 4, bottom: 0 }}>
+   367→   367→              <CartesianGrid stroke="rgba(255,255,255,.07)" strokeDasharray="3 3" />
+   368→   368→              <XAxis dataKey="col" reversed={rtl} interval={0} tick={axisTick} tickLine={false} axisLine={false} />
+   369→   369→              <YAxis orientation={rtl ? 'right' : 'left'} width={32} allowDecimals={false} tick={axisTick} tickLine={false} axisLine={false} tickFormatter={(v) => localizeDigits(Number(v), locale)} />
+   370→   370→              <Tooltip contentStyle={TOOLTIP_STYLE} formatter={tooltipFmt} />
+   371→   371→              <Bar dataKey="count" name={t('chart_firstmove')} fill="#60a5fa" radius={[4, 4, 0, 0]} maxBarSize={30} />
+   372→   372→            </BarChart>
+   373→   373→          </ResponsiveContainer>
+   374→   374→        </ChartCard>
+   375→   375→
+   376→   376→        {/* economy */}
+   377→   377→        <div className="royal-card rounded-2xl p-4 lg:col-span-2">
+   378→   378→          <h3 className="mb-3 flex items-center gap-2 text-sm font-black">
+   379→   379→            <ShoppingBag className="h-4 w-4 text-amber-400" /> اقتصاد بازی · Economy
+   380→   380→          </h3>
+   381→   381→          <div className="grid grid-cols-3 gap-2 text-center">
+   382→   382→            <div className="rounded-xl bg-white/5 p-2.5">
+   383→   383→              <div className="text-lg font-black text-amber-300">{fmt(ec.coinsMinted)}</div>
+   384→   384→              <div className="text-[10px] text-muted-foreground">سکه ضرب‌شده · Minted</div>
+   385→   385→            </div>
+   386→   386→            <div className="rounded-xl bg-white/5 p-2.5">
+   387→   387→              <div className="text-lg font-black text-amber-300">{fmt(ec.coinsSpent)}</div>
+   388→   388→              <div className="text-[10px] text-muted-foreground">سکه خرج‌شده · Spent</div>
+   389→   389→            </div>
+   390→   390→            <div className="rounded-xl bg-white/5 p-2.5">
+   391→   391→              <div className="text-lg font-black text-amber-300">{fmt(ec.purchases)}</div>
+   392→   392→              <div className="text-[10px] text-muted-foreground">خرید · Purchases</div>
+   393→   393→            </div>
+   394→   394→          </div>
+   395→   395→          <div className="mt-3">
+   396→   396→            <div className="mb-1.5 text-xs font-bold text-muted-foreground">پرفروش‌ترین آیتم‌ها · Top items</div>
+   397→   397→            <div className="space-y-1.5">
+   398→   398→              {ec.topItems.map((it, i) => (
+   399→   399→                <div key={it.code} className="flex items-center gap-2 rounded-lg bg-white/[.03] px-2.5 py-1.5 text-xs">
+   400→   400→                  <span className="font-black text-amber-400/70">{fmt(i + 1)}</span>
+   401→   401→                  <span className="font-bold" dir="ltr">{it.code}</span>
+   402→   402→                  <span className="text-muted-foreground">{t(`cat_${it.category}` as TKey)}</span>
+   403→   403→                  <span className="ms-auto font-bold">{fmt(it.sales)} فروش · sold</span>
+   404→   404→                  <span className="w-20 text-end font-black text-amber-300">{fmt(it.price)} 🪙</span>
+   405→   405→                </div>
+   406→   406→              ))}
+   407→   407→            </div>
+   408→   408→          </div>
+   409→   409→        </div>
+   410→   410→      </div>
+   411→   411→    </div>
+   412→   412→  );
+   413→   413→}
+   414→   414→
+   415→   415→/* ---------------------------------- Users ---------------------------------- */
+   416→   416→
+   417→   417→function BanDialog({ target, busy, onClose, onSubmit }: {
+   418→   418→  target: AdminUser; busy: boolean;
+   419→   419→  onClose: () => void;
+   420→   420→  onSubmit: (p: { days: number; permanent: boolean; reason?: string }) => Promise<boolean>;
+   421→   421→}) {
+   422→   422→  const { t } = useApp();
+   423→   423→  const [permanent, setPermanent] = useState(false);
+   424→   424→  const [days, setDays] = useState('3');
+   425→   425→  const [reason, setReason] = useState('');
+   426→   426→
+   427→   427→  const submit = async () => {
+   428→   428→    const ok = await onSubmit({
+   429→   429→      days: permanent ? 0 : Math.max(0, Math.floor(Number(days) || 0)),
+   430→   430→      permanent,
+   431→   431→      reason: reason.trim() || undefined,
+   432→   432→    });
+   433→   433→    if (ok) onClose();
+   434→   434→  };
+   435→   435→
+   436→   436→  return (
+   437→   437→    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+   438→   438→      <DialogContent className="royal-card sm:max-w-sm">
+   439→   439→        <DialogHeader>
+   440→   440→          <DialogTitle className="gold-text">{t('ban')} — <span dir="ltr">{target.username}</span></DialogTitle>
+   441→   441→        </DialogHeader>
+   442→   442→        <div className="space-y-3">
+   443→   443→          <div className="flex items-center justify-between gap-2 rounded-xl bg-white/5 px-3 py-2">
+   444→   444→            <span className="text-sm font-bold">{t('permanent')}</span>
+   445→   445→            <Switch checked={permanent} onCheckedChange={setPermanent} aria-label="permanent ban" />
+   446→   446→          </div>
+   447→   447→          {!permanent && (
+   448→   448→            <label className="block space-y-1">
+   449→   449→              <span className="text-xs text-muted-foreground">{t('days')} (۰ تا ۳۶۵۰ · 0–3650)</span>
+   450→   450→              <Input type="number" min={0} max={3650} dir="ltr" value={days} onChange={(e) => setDays(e.target.value)} />
+   451→   451→            </label>
+   452→   452→          )}
+   453→   453→          <label className="block space-y-1">
+   454→   454→            <span className="text-xs text-muted-foreground">{t('reason')}</span>
+   455→   455→            <Input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} placeholder="دلیل مسدودی · Ban reason" />
+   456→   456→          </label>
+   457→   457→          <Button variant="destructive" className="w-full" disabled={busy || (!permanent && days === '')} onClick={() => void submit()}>
+   458→   458→            <Ban className="h-4 w-4" /> {t('confirm')}
+   459→   459→          </Button>
+   460→   460→        </div>
+   461→   461→      </DialogContent>
+   462→   462→    </Dialog>
+   463→   463→  );
+   464→   464→}
+   465→   465→
+   466→   466→function CoinDialog({ target, busy, onClose, onSubmit }: {
+   467→   467→  target: AdminUser; busy: boolean;
+   468→   468→  onClose: () => void;
+   469→   469→  onSubmit: (amount: number) => Promise<boolean>;
+   470→   470→}) {
+   471→   471→  const { t, locale } = useApp();
+   472→   472→  const [amount, setAmount] = useState('100');
+   473→   473→  const n = Math.floor(Number(amount));
+   474→   474→  const valid = Number.isFinite(n) && n !== 0 && Math.abs(n) <= 100000;
+   475→   475→
+   476→   476→  const submit = async () => {
+   477→   477→    if (!valid) return;
+   478→   478→    const ok = await onSubmit(n);
+   479→   479→    if (ok) onClose();
+   480→   480→  };
+   481→   481→
+   482→   482→  return (
+   483→   483→    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+   484→   484→      <DialogContent className="royal-card sm:max-w-sm">
+   485→   485→        <DialogHeader>
+   486→   486→          <DialogTitle className="flex items-center gap-2 gold-text">
+   487→   487→            <Coins className="h-5 w-5 text-amber-400" /> {t('grant_coins')} — <span dir="ltr">{target.username}</span>
+   488→   488→          </DialogTitle>
+   489→   489→        </DialogHeader>
+   490→   490→        <div className="space-y-3">
+   491→   491→          <div className="text-xs text-muted-foreground">{t('coins')}: <b className="text-foreground">{localizeDigits(target.coins, locale)}</b></div>
+   492→   492→          <Input type="number" dir="ltr" min={-100000} max={100000} value={amount} onChange={(e) => setAmount(e.target.value)} />
+   493→   493→          <div className="flex flex-wrap gap-1.5">
+   494→   494→            {[100, 500, 1000, -100].map((d) => (
+   495→   495→              <button
+   496→   496→                key={d}
+   497→   497→                type="button"
+   498→   498→                dir="ltr"
+   499→   499→                onClick={() => setAmount(String((Number(amount) || 0) + d))}
+   500→   500→                className="rounded-lg border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-xs font-black text-amber-300 transition-colors hover:bg-amber-400/20"
+   501→   501→              >
+   502→   502→                {d > 0 ? `+${d}` : String(d)}
+   503→   503→              </button>
+   504→   504→            ))}
+   505→   505→          </div>
+   506→   506→          <Button className="w-full glow-gold" disabled={busy || !valid} onClick={() => void submit()}>
+   507→   507→            {t('confirm')}
+   508→   508→          </Button>
+   509→   509→        </div>
+   510→   510→      </DialogContent>
+   511→   511→    </Dialog>
+   512→   512→  );
+   513→   513→}
+   514→   514→
+   515→   515→function RoleConfirm({ target, busy, onClose, onSubmit }: {
+   516→   516→  target: { id: string; name: string; action: 'promote' | 'demote' }; busy: boolean;
+   517→   517→  onClose: () => void;
+   518→   518→  onSubmit: () => Promise<boolean>;
+   519→   519→}) {
+   520→   520→  const { t } = useApp();
+   521→   521→  const promote = target.action === 'promote';
+   522→   522→  return (
+   523→   523→    <AlertDialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+   524→   524→      <AlertDialogContent className="royal-card">
+   525→   525→        <AlertDialogHeader>
+   526→   526→          <AlertDialogTitle className="gold-text">{promote ? t('make_admin') : t('remove_admin')}</AlertDialogTitle>
+   527→   527→          <AlertDialogDescription>
+   528→   528→            {promote
+   529→   529→              ? 'این کاربر دسترسی مدیریتی کامل می‌گیرد · This grants full admin access'
+   530→   530→              : 'دسترسی مدیریتی این کاربر برداشته می‌شود · Admin access will be revoked'}
+   531→   531→            {' '}— <b dir="ltr">{target.name}</b>
+   532→   532→          </AlertDialogDescription>
+   533→   533→        </AlertDialogHeader>
+   534→   534→        <AlertDialogFooter>
+   535→   535→          <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+   536→   536→          <AlertDialogAction
+   537→   537→            disabled={busy}
+   538→   538→            onClick={(e) => { e.preventDefault(); void onSubmit().then((ok) => { if (ok) onClose(); }); }}
+   539→   539→          >
+   540→   540→            {t('confirm')}
+   541→   541→          </AlertDialogAction>
+   542→   542→        </AlertDialogFooter>
+   543→   543→      </AlertDialogContent>
+   544→   544→    </AlertDialog>
+   545→   545→  );
+   546→   546→}
+   547→   547→
+   548→   548→function UsersTab() {
+   549→   549→  const { t, locale, user: me } = useApp();
+   550→   550→  const fmt = (n: number) => localizeDigits(n, locale);
+   551→   551→
+   552→   552→  const [q, setQ] = useState('');
+   553→   553→  const [dq, setDq] = useState('');
+   554→   554→  const [page, setPage] = useState(0);
+   555→   555→  const [busy, setBusy] = useState(false);
+   556→   556→  const [banTarget, setBanTarget] = useState<AdminUser | null>(null);
+   557→   557→  const [coinTarget, setCoinTarget] = useState<AdminUser | null>(null);
+   558→   558→  const [roleTarget, setRoleTarget] = useState<{ id: string; name: string; action: 'promote' | 'demote' } | null>(null);
+   559→   559→  const [detailTarget, setDetailTarget] = useState<AdminUser | null>(null);
+   560→   560→
+   561→   561→  /* debounced search */
+   562→   562→  useEffect(() => {
+   563→   563→    const id = setTimeout(() => { setDq(q.trim()); setPage(0); }, 400);
+   564→   564→    return () => clearTimeout(id);
+   565→   565→  }, [q]);
+   566→   566→
+   567→   567→  const { data, loading, refresh } = useAdminData<UsersDTO>(`/api/admin/users?q=${encodeURIComponent(dq)}&page=${page}`);
+   568→   568→  const users = data?.users ?? [];
+   569→   569→  const total = data?.total ?? 0;
+   570→   570→  const totalPages = Math.max(1, Math.ceil(total / 25));
+   571→   571→
+   572→   572→  const act = async (
+   573→   573→    userId: string,
+   574→   574→    action: 'ban' | 'unban' | 'grant_coins' | 'promote' | 'demote',
+   575→   575→    extra?: { days?: number; permanent?: boolean; reason?: string; amount?: number },
+   576→   576→  ): Promise<boolean> => {
+   577→   577→    setBusy(true);
+   578→   578→    try {
+   579→   579→      await api.post('/api/admin/users', { userId, action, ...extra });
+   580→   580→      toast.success(t('success'));
+   581→   581→      refresh();
+   582→   582→      return true;
+   583→   583→    } catch (e) {
+   584→   584→      toast.error(apiErrMsg(e, t));
+   585→   585→      return false;
+   586→   586→    } finally {
+   587→   587→      setBusy(false);
+   588→   588→    }
+   589→   589→  };
+   590→   590→
+   591→   591→  return (
+   592→   592→    <div className="space-y-3">
+   593→   593→      {/* search */}
+   594→   594→      <div className="relative">
+   595→   595→        <Search className="pointer-events-none absolute start-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+   596→   596→        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`${t('search')}…`} maxLength={32} className="ps-9" />
+   597→   597→      </div>
+   598→   598→
+   599→   599→      {loading && !data ? <ListSkeleton rows={6} /> : (
+   600→   600→        <div className="royal-card rounded-2xl">
+   601→   601→          <div className="overflow-x-auto nice-scroll">
+   602→   602→            <Table className="min-w-[920px]">
+   603→   603→              <TableHeader>
+   604→   604→                <TableRow className="border-amber-500/15 hover:bg-transparent">
+   605→   605→                  <TableHead>{t('username')}</TableHead>
+   606→   606→                  <TableHead>{t('level')}</TableHead>
+   607→   607→                  <TableHead>رنکینگ · Rating</TableHead>
+   608→   608→                  <TableHead>{t('coins')}</TableHead>
+   609→   609→                  <TableHead>{t('games_played')}</TableHead>
+   610→   610→                  <TableHead>{t('role')}</TableHead>
+   611→   611→                  <TableHead>{t('banned_label')}</TableHead>
+   612→   612→                  <TableHead>{t('member_since')}</TableHead>
+   613→   613→                  <TableHead>آخرین بازدید · Last seen</TableHead>
+   614→   614→                  <TableHead className="w-10" />
+   615→   615→                </TableRow>
+   616→   616→              </TableHeader>
+   617→   617→              <TableBody>
+   618→   618→                {users.map((u) => {
+   619→   619→                  const online = u.lastSeen ? Date.now() - new Date(u.lastSeen).getTime() < 5 * 60_000 : false;
+   620→   620→                  return (
+   621→   621→                    <TableRow key={u.id} className="border-amber-500/10">
+   622→   622→                      <TableCell>
+   623→   623→                        <div className="flex items-center gap-1.5">
+   624→   624→                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${online ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,.9)]' : 'bg-white/10'}`} />
+   625→   625→                          <button
+   626→   626→                            className="font-bold underline-offset-4 transition-colors hover:text-amber-300 hover:underline"
+   627→   627→                            onClick={() => setDetailTarget(u)}
+   628→   628→                            title="پروفایل کامل · Full profile"
+   629→   629→                          >
+   630→   630→                            {u.username}
+   631→   631→                          </button>
+   632→   632→                          {u.isGuest && <Badge variant="outline" className="border-slate-400/30 bg-slate-500/10 text-[9px] text-slate-300">{t('guest')}</Badge>}
+   633→   633→                        </div>
+   634→   634→                      </TableCell>
+   635→   635→                      <TableCell>{fmt(u.level)}</TableCell>
+   636→   636→                      <TableCell>{fmt(u.rating)}</TableCell>
+   637→   637→                      <TableCell className="font-bold text-amber-300">{fmt(u.coins)}</TableCell>
+   638→   638→                      <TableCell>{fmt(u.gamesPlayed)}</TableCell>
+   639→   639→                      <TableCell>
+   640→   640→                        {u.role === 'ADMIN'
+   641→   641→                          ? <Badge variant="outline" className="border-amber-400/40 bg-amber-500/15 text-amber-300">مدیر · Admin</Badge>
+   642→   642→                          : <span className="text-xs text-muted-foreground">بازیکن · Player</span>}
+   643→   643→                      </TableCell>
+   644→   644→                      <TableCell>
+   645→   645→                        {u.banned ? (
+   646→   646→                          <div className="space-y-0.5">
+   647→   647→                            <Badge variant="outline" className="border-rose-400/40 bg-rose-500/15 text-rose-300">{t('banned_label')}</Badge>
+   648→   648→                            <div className="max-w-36 truncate text-[10px] text-rose-300/70" dir="auto">{u.banReason ?? '—'}</div>
+   649→   649→                            {u.bannedUntil && <div className="text-[10px] text-muted-foreground">تا · until {fmtDate(u.bannedUntil, locale)}</div>}
+   650→   650→                          </div>
+   651→   651→                        ) : (
+   652→   652→                          <span className="text-muted-foreground">—</span>
+   653→   653→                        )}
+   654→   654→                      </TableCell>
+   655→   655→                      <TableCell className="text-xs text-muted-foreground">{fmtDate(u.createdAt, locale)}</TableCell>
+   656→   656→                      <TableCell className="text-xs text-muted-foreground">{fmtDateTime(u.lastSeen, locale)}</TableCell>
+   657→   657→                      <TableCell>
+   658→   658→                        <DropdownMenu>
+   659→   659→                          <DropdownMenuTrigger asChild>
+   660→   660→                            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`actions ${u.username}`}>
+   661→   661→                              <MoreVertical className="h-4 w-4" />
+   662→   662→                            </Button>
+   663→   663→                          </DropdownMenuTrigger>
+   664→   664→                          <DropdownMenuContent align="end" className="w-52">
+   665→   665→                            <DropdownMenuItem className="gap-2" onClick={() => setDetailTarget(u)}>
+   666→   666→                              <Eye className="h-4 w-4 text-sky-400" /> پروفایل کامل · Full profile
+   667→   667→                            </DropdownMenuItem>
+   668→   668→                            <DropdownMenuItem className="gap-2" onClick={() => setCoinTarget(u)}>
+   669→   669→                              <Coins className="h-4 w-4 text-amber-400" /> {t('grant_coins')}
+   670→   670→                            </DropdownMenuItem>
+   671→   671→                            {u.role !== 'ADMIN' && !u.banned && (
+   672→   672→                              <DropdownMenuItem className="gap-2 text-rose-300 focus:text-rose-300" onClick={() => setBanTarget(u)}>
+   673→   673→                                <Ban className="h-4 w-4" /> {t('ban')}
+   674→   674→                              </DropdownMenuItem>
+   675→   675→                            )}
+   676→   676→                            {u.banned && (
+   677→   677→                              <DropdownMenuItem className="gap-2" onClick={() => void act(u.id, 'unban')}>
+   678→   678→                                <UserCheck className="h-4 w-4 text-emerald-400" /> {t('unban')}
+   679→   679→                              </DropdownMenuItem>
+   680→   680→                            )}
+   681→   681→                            {u.role !== 'ADMIN' && (
+   682→   682→                              <DropdownMenuItem className="gap-2" onClick={() => setRoleTarget({ id: u.id, name: u.username, action: 'promote' })}>
+   683→   683→                                <ShieldCheck className="h-4 w-4 text-amber-400" /> {t('make_admin')}
+   684→   684→                              </DropdownMenuItem>
+   685→   685→                            )}
+   686→   686→                            {u.role === 'ADMIN' && u.id !== me?.id && (
+   687→   687→                              <DropdownMenuItem className="gap-2 text-rose-300 focus:text-rose-300" onClick={() => setRoleTarget({ id: u.id, name: u.username, action: 'demote' })}>
+   688→   688→                                <ShieldOff className="h-4 w-4" /> {t('remove_admin')}
+   689→   689→                              </DropdownMenuItem>
+   690→   690→                            )}
+   691→   691→                          </DropdownMenuContent>
+   692→   692→                        </DropdownMenu>
+   693→   693→                      </TableCell>
+   694→   694→                    </TableRow>
+   695→   695→                  );
+   696→   696→                })}
+   697→   697→                {users.length === 0 && (
+   698→   698→                  <TableRow>
+   699→   699→                    <TableCell colSpan={10} className="py-8 text-center text-muted-foreground">کاربری یافت نشد · No users found</TableCell>
+   700→   700→                  </TableRow>
+   701→   701→                )}
+   702→   702→              </TableBody>
+   703→   703→            </Table>
+   704→   704→          </div>
+   705→   705→        </div>
+   706→   706→      )}
+   707→   707→
+   708→   708→      {/* pagination */}
+   709→   709→      <div className="flex flex-wrap items-center justify-between gap-2">
+   710→   710→        <div className="text-xs text-muted-foreground">{t('total_users')}: <b className="text-foreground">{fmt(total)}</b></div>
+   711→   711→        <div className="flex items-center gap-2">
+   712→   712→          <Button variant="outline" size="sm" disabled={page <= 0} onClick={() => setPage((p) => Math.max(0, p - 1))} aria-label="previous page">
+   713→   713→            <ChevronLeft className="h-4 w-4 rtl:rotate-180" />
+   714→   714→          </Button>
+   715→   715→          <span className="min-w-28 text-center text-xs font-bold">صفحه {fmt(page + 1)} / {fmt(totalPages)} · Page</span>
+   716→   716→          <Button variant="outline" size="sm" disabled={(page + 1) * 25 >= total} onClick={() => setPage((p) => p + 1)} aria-label="next page">
+   717→   717→            <ChevronRight className="h-4 w-4 rtl:rotate-180" />
+   718→   718→          </Button>
+   719→   719→        </div>
+   720→   720→      </div>
+   721→   721→
+   722→   722→      {detailTarget && (
+   723→   723→        <UserDetailSheet
+   724→   724→          target={detailTarget}
+   725→   725→          onClose={() => setDetailTarget(null)}
+   726→   726→          act={act}
+   727→   727→          onOpenBan={() => setBanTarget(detailTarget)}
+   728→   728→        />
+   729→   729→      )}
+   730→   730→      {banTarget && (
+   731→   731→        <BanDialog
+   732→   732→          target={banTarget}
+   733→   733→          busy={busy}
+   734→   734→          onClose={() => setBanTarget(null)}
+   735→   735→          onSubmit={(p) => act(banTarget.id, 'ban', { days: p.days, permanent: p.permanent, reason: p.reason })}
+   736→   736→        />
+   737→   737→      )}
+   738→   738→      {coinTarget && (
+   739→   739→        <CoinDialog
+   740→   740→          target={coinTarget}
+   741→   741→          busy={busy}
+   742→   742→          onClose={() => setCoinTarget(null)}
+   743→   743→          onSubmit={(amount) => act(coinTarget.id, 'grant_coins', { amount })}
+   744→   744→        />
+   745→   745→      )}
+   746→   746→      {roleTarget && (
+   747→   747→        <RoleConfirm
+   748→   748→          target={roleTarget}
+   749→   749→          busy={busy}
+   750→   750→          onClose={() => setRoleTarget(null)}
+   751→   751→          onSubmit={() => act(roleTarget.id, roleTarget.action)}
+   752→   752→        />
+   753→   753→      )}
+   754→   754→    </div>
+   755→   755→  );
+   756→   756→}
+   757→   757→
+   758→   758→/* ------------------------------ User detail ------------------------------- */
+   759→   759→
+   760→   760→interface DetailUser {
+   761→   761→  id: string; username: string; role: string; isGuest: boolean; banned: boolean;
+   762→   762→  banReason: string | null; bannedUntil: string | null; banCount: number;
+   763→   763→  coins: number; xp: number; level: number; rating: number;
+   764→   764→  wins: number; losses: number; draws: number; gamesPlayed: number;
+   765→   765→  streak: number; bestStreak: number; bio: string; locale: string;
+   766→   766→  pieceSkin: string; boardSkin: string; background: string; effectSkin: string;
+   767→   767→  avatarItem: string; titleItem: string; showcase: string[]; checkinStreak: number;
+   768→   768→  createdAt: string; lastSeen: string | null;
+   769→   769→}
+   770→   770→interface DetailMatch {
+   771→   771→  id: string; mode: string; aiLevel: string | null; winner: string; endReason: string;
+   772→   772→  p1Id: string | null; p2Id: string | null; p1Name: string; p2Name: string;
+   773→   773→  p1RatingDelta: number; p2RatingDelta: number; moves: number; createdAt: string;
+   774→   774→}
+   775→   775→interface DetailDTO {
+   776→   776→  user: DetailUser;
+   777→   777→  matches: DetailMatch[];
+   778→   778→  purchases: { id: string; itemId: string; price: number; createdAt: string }[];
+   779→   779→  reportsAgainst: number; reportsBy: number;
+   780→   780→}
+   781→   781→
+   782→   782→function UserDetailSheet({ target, onClose, act, onOpenBan }: {
+   783→   783→  target: AdminUser; onClose: () => void;
+   784→   784→  act: (userId: string, action: 'ban' | 'unban' | 'grant_coins' | 'promote' | 'demote', extra?: { days?: number; permanent?: boolean; reason?: string; amount?: number }) => Promise<boolean>;
+   785→   785→  onOpenBan: () => void;
+   786→   786→}) {
+   787→   787→  const { t, locale } = useApp();
+   788→   788→  const fmt = (n: number) => localizeDigits(n, locale);
+   789→   789→  const [data, setData] = useState<DetailDTO | null>(null);
+   790→   790→  const [failed, setFailed] = useState(false);
+   791→   791→  const [coinAmount, setCoinAmount] = useState('');
+   792→   792→  const [busyLocal, setBusyLocal] = useState(false);
+   793→   793→
+   794→   794→  const reload = useCallback(() => {
+   795→   795→    api.get<DetailDTO>(`/api/admin/users?userId=${encodeURIComponent(target.id)}`)
+   796→   796→      .then((d) => setData(d))
+   797→   797→      .catch(() => setFailed(true));
+   798→   798→  }, [target.id]);
+   799→   799→
+   800→   800→  useEffect(() => {
+   801→   801→    let alive = true;
+   802→   802→    api.get<DetailDTO>(`/api/admin/users?userId=${encodeURIComponent(target.id)}`)
+   803→   803→      .then((d) => { if (alive) setData(d); })
+   804→   804→      .catch(() => { if (alive) setFailed(true); });
+   805→   805→    return () => { alive = false; };
+   806→   806→  }, [target.id]);
+   807→   807→
+   808→   808→  const quickAct = async (action: 'unban' | 'grant_coins' | 'promote' | 'demote', extra?: { amount?: number }) => {
+   809→   809→    setBusyLocal(true);
+   810→   810→    const ok = await act(target.id, action, extra);
+   811→   811→    setBusyLocal(false);
+   812→   812→    if (ok) { if (action === 'grant_coins') setCoinAmount(''); reload(); }
+   813→   813→  };
+   814→   814→
+   815→   815→  const [roleConfirm, setRoleConfirm] = useState(false);
+   816→   816→
+   817→   817→  const endLabel = (e: string) =>
+   818→   818→    e === 'KIND' ? t('win_kind') : e === 'RUN' ? t('win_run') : e === 'FULL' ? t('draw_full') : e === 'RESIGN' ? t('resign') : e === 'TIMEOUT' ? t('timeout_win') : e;
+   819→   819→
+   820→   820→  const modeBadge = (m: string) =>
+   821→   821→    m === 'PVE'
+   822→   822→      ? { label: t('mode_ai'), cls: 'border-sky-500/40 bg-sky-500/10 text-sky-300' }
+   823→   823→      : m === 'ONLINE'
+   824→   824→        ? { label: t('online'), cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' }
+   825→   825→        : { label: t('mode_local'), cls: 'border-violet-500/40 bg-violet-500/10 text-violet-300' };
+   826→   826→
+   827→   827→  const xpNeed = 100 + 60 * (target.level - 1);
+   828→   828→  const stat = (label: string, value: string, cls = 'text-foreground') => (
+   829→   829→    <div className="rounded-lg border border-amber-500/10 bg-muted/40 p-2 text-center">
+   830→   830→      <div className={`text-base font-black ${cls}`}>{value}</div>
+   831→   831→      <div className="text-[10px] text-muted-foreground">{label}</div>
+   832→   832→    </div>
+   833→   833→  );
+   834→   834→
+   835→   835→  return (
+   836→   836→    <Sheet open onOpenChange={(o) => !o && onClose()}>
+   837→   837→      <SheetContent side="left" className="royal-card nice-scroll w-full overflow-y-auto p-0 sm:max-w-md" dir="auto">
+   838→   838→        <SheetHeader className="border-b border-amber-500/15 p-4 text-start">
+   839→   839→          <SheetTitle className="flex flex-wrap items-center gap-2 text-base">
+   840→   840→            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-amber-500/40 to-fuchsia-600/30 text-sm font-black text-amber-200">
+   841→   841→              {target.username.slice(0, 2).toUpperCase()}
+   842→   842→            </span>
+   843→   843→            <span className="font-black">{target.username}</span>
+   844→   844→            {target.role === 'ADMIN' && <Badge variant="outline" className="border-amber-400/40 bg-amber-500/15 text-amber-300">مدیر · Admin</Badge>}
+   845→   845→            {target.isGuest && <Badge variant="outline" className="border-slate-400/30 bg-slate-500/10 text-[9px] text-slate-300">{t('guest')}</Badge>}
+   846→   846→            {target.banned && <Badge variant="outline" className="border-rose-400/40 bg-rose-500/15 text-rose-300">{t('banned_label')}</Badge>}
+   847→   847→          </SheetTitle>
+   848→   848→        </SheetHeader>
+   849→   849→
+   850→   850→        {!data && !failed && (
+   851→   851→          <div className="space-y-2 p-4">
+   852→   852→            <ListSkeleton rows={5} />
+   853→   853→          </div>
+   854→   854→        )}
+   855→   855→        {failed && (
+   856→   856→          <div className="p-4 text-sm text-rose-300">خطا در بارگذاری · Failed to load profile</div>
+   857→   857→        )}
+   858→   858→
+   859→   859→        {data && (
+   860→   860→          <div className="space-y-4 p-4">
+   861→   861→            {/* quick actions (R7) */}
+   862→   862→            <div className="rounded-xl border border-amber-500/20 bg-gradient-to-b from-amber-500/10 to-transparent p-3">
+   863→   863→              <div className="mb-2 flex items-center gap-1.5 text-[11px] font-black text-amber-300">
+   864→   864→                <Zap className="h-3.5 w-3.5" /> {t('quick_actions')}
+   865→   865→              </div>
+   866→   866→              <div className="flex flex-wrap items-center gap-2">
+   867→   867→                <div className="flex min-w-44 flex-1 items-center gap-1.5">
+   868→   868→                  <Input
+   869→   869→                    value={coinAmount}
+   870→   870→                    onChange={(e) => setCoinAmount(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+   871→   871→                    placeholder="250"
+   872→   872→                    className="h-8 w-24"
+   873→   873→                    dir="ltr"
+   874→   874→                    inputMode="numeric"
+   875→   875→                    aria-label={t('grant_coins')}
+   876→   876→                  />
+   877→   877→                  <Button size="sm" variant="secondary" className="h-8" disabled={busyLocal || !coinAmount || Number(coinAmount) <= 0} onClick={() => void quickAct('grant_coins', { amount: Number(coinAmount) })}>
+   878→   878→                    <Coins className="h-3.5 w-3.5 text-amber-400" /> {t('grant_coins')}
+   879→   879→                  </Button>
+   880→   880→                </div>
+   881→   881→                {(data.user.banned || target.banned) ? (
+   882→   882→                  <Button size="sm" variant="outline" className="h-8 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/15" disabled={busyLocal} onClick={() => void quickAct('unban')}>
+   883→   883→                    <UserCheck className="h-3.5 w-3.5" /> {t('unban')}
+   884→   884→                  </Button>
+   885→   885→                ) : (
+   886→   886→                  <Button size="sm" variant="outline" className="h-8 border-rose-500/40 text-rose-300 hover:bg-rose-500/10" disabled={busyLocal || data.user.role === 'ADMIN'} onClick={onOpenBan}>
+   887→   887→                    <Ban className="h-3.5 w-3.5" /> {t('ban')}
+   888→   888→                  </Button>
+   889→   889→                )}
+   890→   890→                {/* inline role change (R8) — mirrors the row dropdown, with its own confirm */}
+   891→   891→                {data.user.role === 'ADMIN' ? (
+   892→   892→                  <Button size="sm" variant="outline" className="h-8 border-slate-400/40 text-slate-300 hover:bg-slate-500/10" disabled={busyLocal} onClick={() => setRoleConfirm(true)}>
+   893→   893→                    <ShieldOff className="h-3.5 w-3.5" /> {t('remove_admin')}
+   894→   894→                  </Button>
+   895→   895→                ) : (
+   896→   896→                  <Button size="sm" variant="outline" className="h-8 border-amber-400/40 text-amber-300 hover:bg-amber-500/10" disabled={busyLocal} onClick={() => setRoleConfirm(true)}>
+   897→   897→                    <ShieldCheck className="h-3.5 w-3.5" /> {t('make_admin')}
+   898→   898→                  </Button>
+   899→   899→                )}
+   900→   900→              </div>
+   901→   901→            </div>
+   902→   902→
+   903→   903→            {/* role change confirm (inline in sheet) */}
+   904→   904→            <AlertDialog open={roleConfirm} onOpenChange={setRoleConfirm}>
+   905→   905→              <AlertDialogContent dir="rtl" className="royal-card">
+   906→   906→                <AlertDialogHeader>
+   907→   907→                  <AlertDialogTitle className="gold-text">
+   908→   908→                    {data.user.role === 'ADMIN' ? t('remove_admin') : t('make_admin')} — <span dir="ltr">{target.username}</span>
+   909→   909→                  </AlertDialogTitle>
+   910→   910→                  <AlertDialogDescription>
+   911→   911→                    {data.user.role === 'ADMIN'
+   912→   912→                      ? 'این کاربر دسترسی مدیریتی را از دست می‌دهد · This revokes full admin access'
+   913→   913→                      : 'این کاربر دسترسی مدیریتی کامل می‌گیرد · This grants full admin access'}
+   914→   914→                  </AlertDialogDescription>
+   915→   915→                </AlertDialogHeader>
+   916→   916→                <AlertDialogFooter>
+   917→   917→                  <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+   918→   918→                  <AlertDialogAction
+   919→   919→                    className={data.user.role === 'ADMIN' ? 'bg-slate-600 text-white hover:bg-slate-700' : 'bg-amber-500 text-amber-950 hover:bg-amber-400'}
+   920→   920→                    onClick={() => { void quickAct(data.user.role === 'ADMIN' ? 'demote' : 'promote'); setRoleConfirm(false); }}
+   921→   921→                  >
+   922→   922→                    {t('confirm')}
+   923→   923→                  </AlertDialogAction>
+   924→   924→                </AlertDialogFooter>
+   925→   925→              </AlertDialogContent>
+   926→   926→            </AlertDialog>
+   927→   927→
+   928→   928→            {/* identity + economy */}
+   929→   929→            <div className="grid grid-cols-3 gap-2">
+   930→   930→              {stat(t('coins'), fmt(data.user.coins), 'text-amber-300')}
+   931→   931→              {stat(t('level'), fmt(data.user.level), 'text-sky-300')}
+   932→   932→              {stat('رنکینگ · Rating', fmt(data.user.rating), 'text-fuchsia-300')}
+   933→   933→              {stat(t('wins'), fmt(data.user.wins), 'text-emerald-300')}
+   934→   934→              {stat(t('losses'), fmt(data.user.losses), 'text-rose-300')}
+   935→   935→              {stat(t('games_played'), fmt(data.user.gamesPlayed))}
+   936→   936→              {stat(`${t('wins')} 🔥`, `${fmt(data.user.streak)}/${fmt(data.user.bestStreak)}`)}
+   937→   937→              {stat('حضور روزانه · Check-in', fmt(data.user.checkinStreak))}
+   938→   938→              {stat('بن‌ها · Bans', fmt(data.user.banCount), data.user.banCount > 0 ? 'text-rose-300' : 'text-foreground')}
+   939→   939→            </div>
+   940→   940→
+   941→   941→            {/* xp progress */}
+   942→   942→            <div className="rounded-xl border border-amber-500/10 bg-muted/30 p-3">
+   943→   943→              <div className="mb-1.5 flex items-center justify-between text-[11px] font-bold">
+   944→   944→                <span>XP</span>
+   945→   945→                <span className="text-muted-foreground">{fmt(data.user.xp)} / {fmt(xpNeed)}</span>
+   946→   946→              </div>
+   947→   947→              <Progress value={Math.min(100, (data.user.xp / xpNeed) * 100)} className="h-2" />
+   948→   948→            </div>
+   949→   949→
+   950→   950→            {/* meta */}
+   951→   951→            <div className="space-y-1 text-[11px] text-muted-foreground">
+   952→   952→              <div>{t('member_since')}: <b className="text-foreground">{fmtDate(data.user.createdAt, locale)}</b></div>
+   953→   953→              <div>آخرین بازدید · Last seen: <b className="text-foreground">{fmtDateTime(data.user.lastSeen, locale)}</b></div>
+   954→   954→              {data.user.banned && data.user.banReason && (
+   955→   955→                <div className="text-rose-300">{t('banned_label')}: {data.user.banReason}{data.user.bannedUntil ? ` — ${fmtDate(data.user.bannedUntil, locale)}` : ' (دائمی · permanent)'}</div>
+   956→   956→              )}
+   957→   957→              {data.user.bio && <div dir="auto" className="rounded-lg bg-muted/40 p-2 leading-relaxed text-foreground">“{data.user.bio}”</div>}
+   958→   958→              {/* cosmetics */}
+   959→   959→              <div className="flex flex-wrap gap-1 pt-1">
+   960→   960→                {[['🪙', data.user.pieceSkin], ['🎮', data.user.boardSkin], ['🖼', data.user.background], ['✨', data.user.effectSkin], ['🙂', data.user.avatarItem], ['👑', data.user.titleItem]]
+   961→   961→                  .filter(([, code]) => !!code)
+   962→   962→                  .map(([icon, code], i) => (
+   963→   963→                    <span key={i} className="rounded-full border border-border bg-muted/40 px-2 py-0.5 font-mono text-[10px]" dir="ltr">{icon} {code}</span>
+   964→   964→                  ))}
+   965→   965→              </div>
+   966→   966→            </div>
+   967→   967→
+   968→   968→            {/* reports */}
+   969→   969→            <div className="grid grid-cols-2 gap-2">
+   970→   970→              {stat('گزارش علیه · Reported', fmt(data.reportsAgainst), data.reportsAgainst > 0 ? 'text-rose-300' : 'text-foreground')}
+   971→   971→              {stat('گزارش داده · Filed', fmt(data.reportsBy))}
+   972→   972→            </div>
+   973→   973→
+   974→   974→            {/* purchases */}
+   975→   975→            <div>
+   976→   976→              <h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-black"><ShoppingBag className="h-3.5 w-3.5 text-amber-400" /> خریدها · Purchases ({fmt(data.purchases.length)})</h4>
+   977→   977→              <div className="max-h-32 space-y-1 overflow-y-auto nice-scroll rounded-xl border border-amber-500/10 p-2">
+   978→   978→                {data.purchases.length === 0 && <div className="py-2 text-center text-[11px] text-muted-foreground">—</div>}
+   979→   979→                {data.purchases.map((p) => (
+   980→   980→                  <div key={p.id} className="flex items-center justify-between gap-2 text-[11px]">
+   981→   981→                    <span className="font-mono" dir="ltr">{p.itemId}</span>
+   982→   982→                    <span className="shrink-0 text-amber-300">🪙{fmt(p.price)}</span>
+   983→   983→                  </div>
+   984→   984→                ))}
+   985→   985→              </div>
+   986→   986→            </div>
+   987→   987→
+   988→   988→            {/* matches */}
+   989→   989→            <div>
+   990→   990→              <h4 className="mb-1.5 flex items-center gap-1.5 text-xs font-black"><Swords className="h-3.5 w-3.5 text-amber-400" /> نبردهای اخیر · Recent duels ({fmt(data.matches.length)})</h4>
+   991→   991→              <div className="max-h-64 space-y-1.5 overflow-y-auto nice-scroll">
+   992→   992→                {data.matches.length === 0 && <div className="py-3 text-center text-[11px] text-muted-foreground">—</div>}
+   993→   993→                {data.matches.map((m) => {
+   994→   994→                  const mb = modeBadge(m.mode);
+   995→   995→                  const isP1 = m.p1Id === target.id;
+   996→   996→                  const opp = isP1 ? (m.p2Name || '—') : (m.p1Name || '—');
+   997→   997→                  const won = (isP1 && m.winner === 'P1') || (!isP1 && m.winner === 'P2');
+   998→   998→                  const draw = m.winner === 'DRAW';
+   999→   999→                  const delta = isP1 ? m.p1RatingDelta : m.p2RatingDelta;
+  1000→  1000→                  return (
+  1001→  1001→                    <div key={m.id} className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/10 bg-muted/30 px-2 py-1.5 text-[11px]">
+  1002→  1002→                      <Badge variant="outline" className={`text-[9px] ${mb.cls}`}>{mb.label}</Badge>
+  1003→  1003→                      <span className="min-w-0 flex-1 truncate" dir="auto">vs <b>{opp}</b></span>
+  1004→  1004→                      <span className={`font-black ${draw ? 'text-muted-foreground' : won ? 'text-emerald-300' : 'text-rose-300'}`}>
+  1005→  1005→                        {draw ? '=' : won ? '✓' : '✗'}
+  1006→  1006→                      </span>
+  1007→  1007→                      <span className="text-muted-foreground">{endLabel(m.endReason)}</span>
+  1008→  1008→                      <span className="shrink-0 tabular-nums text-muted-foreground">{delta !== 0 ? `${delta > 0 ? '+' : ''}${fmt(delta)}` : ''}</span>
+  1009→  1009→                    </div>
+  1010→  1010→                  );
+  1011→  1011→                })}
+  1012→  1012→              </div>
+  1013→  1013→            </div>
+  1014→  1014→          </div>
+  1015→  1015→        )}
+  1016→  1016→      </SheetContent>
+  1017→  1017→    </Sheet>
+  1018→  1018→  );
+  1019→  1019→}
+  1020→  1020→
+  1021→  1021→/* --------------------------------- Reports --------------------------------- */
+  1022→  1022→
+  1023→  1023→function ReportsTab() {
+  1024→  1024→  const { t, locale } = useApp();
+  1025→  1025→  const [status, setStatus] = useState<'ALL' | 'OPEN' | 'ACTIONED' | 'DISMISSED'>('ALL');
+  1026→  1026→  const [busyId, setBusyId] = useState<string | null>(null);
+  1027→  1027→  const url = status === 'ALL' ? '/api/admin/reports' : `/api/admin/reports?status=${status}`;
+  1028→  1028→  const { data, loading, refresh } = useAdminData<{ reports: AdminReport[] }>(url);
+  1029→  1029→  const reports = data?.reports ?? [];
+  1030→  1030→
+  1031→  1031→  const act = async (reportId: string, action: 'dismiss' | 'ban7' | 'banPerm') => {
+  1032→  1032→    setBusyId(reportId);
+  1033→  1033→    try {
+  1034→  1034→      await api.post('/api/admin/reports', { reportId, action });
+  1035→  1035→      toast.success(t('success'));
+  1036→  1036→      refresh();
+  1037→  1037→    } catch (e) {
+  1038→  1038→      toast.error(apiErrMsg(e, t));
+  1039→  1039→    } finally {
+  1040→  1040→      setBusyId(null);
+  1041→  1041→    }
+  1042→  1042→  };
+  1043→  1043→
+  1044→  1044→  return (
+  1045→  1045→    <div className="space-y-3">
+  1046→  1046→      {/* status filter */}
+  1047→  1047→      <div className="flex flex-wrap gap-1.5">
+  1048→  1048→        {(['ALL', 'OPEN', 'ACTIONED', 'DISMISSED'] as const).map((s) => (
+  1049→  1049→          <button
+  1050→  1050→            key={s}
+  1051→  1051→            type="button"
+  1052→  1052→            onClick={() => setStatus(s)}
+  1053→  1053→            className={`rounded-full px-3 py-1 text-xs font-bold transition-colors ${
+  1054→  1054→              status === s
+  1055→  1055→                ? 'border border-amber-400/40 bg-amber-400/20 text-amber-300'
+  1056→  1056→                : 'border border-white/10 text-muted-foreground hover:bg-muted'
+  1057→  1057→            }`}
+  1058→  1058→          >
+  1059→  1059→            {s === 'ALL' ? 'همه · All' : t(`status_${s}` as TKey)}
+  1060→  1060→          </button>
+  1061→  1061→        ))}
+  1062→  1062→      </div>
+  1063→  1063→
+  1064→  1064→      {loading && !data ? <ListSkeleton rows={4} /> : reports.length === 0 ? (
+  1065→  1065→        <EmptyHint>گزارشی نیست · No reports</EmptyHint>
+  1066→  1066→      ) : (
+  1067→  1067→        <div className="space-y-2.5">
+  1068→  1068→          {reports.map((r) => (
+  1069→  1069→            <div key={r.id} className="royal-card rounded-2xl p-4">
+  1070→  1070→              <div className="flex flex-wrap items-center gap-2">
+  1071→  1071→                <Flag className="h-4 w-4 shrink-0 text-rose-400" />
+  1072→  1072→                <span className="font-black">{r.target?.username ?? r.targetName}</span>
+  1073→  1073→                <Badge variant="outline" className="border-purple-400/40 bg-purple-500/10 text-purple-300">
+  1074→  1074→                  {t(`report_reason_${r.reason}` as TKey)}
+  1075→  1075→                </Badge>
+  1076→  1076→                <Badge variant="outline" className={STATUS_STYLE[r.status] ?? ''}>
+  1077→  1077→                  {t(`status_${r.status}` as TKey)}
+  1078→  1078→                </Badge>
+  1079→  1079→                <span className="ms-auto text-[11px] text-muted-foreground">{fmtDateTime(r.createdAt, locale)}</span>
+  1080→  1080→              </div>
+  1081→  1081→              {r.details && <p className="mt-2 text-sm leading-relaxed" dir="auto">{r.details}</p>}
+  1082→  1082→              {r.chatExcerpt && (
+  1083→  1083→                <blockquote className="mt-2 rounded-lg bg-white/[.04] p-2 text-xs text-muted-foreground" dir="auto">
+  1084→  1084→                  «{r.chatExcerpt}»
+  1085→  1085→                </blockquote>
+  1086→  1086→              )}
+  1087→  1087→              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+  1088→  1088→                <span>{t('reported_player')}: <b className="text-foreground">{r.target?.username ?? r.targetName}</b></span>
+  1089→  1089→                <span>گزارش‌دهنده · Reporter: <b className="text-foreground">{r.reporter?.username ?? '—'}</b></span>
+  1090→  1090→              </div>
+  1091→  1091→              {r.status === 'OPEN' && (
+  1092→  1092→                <div className="mt-3 flex flex-wrap gap-2">
+  1093→  1093→                  <Button size="sm" variant="outline" disabled={busyId === r.id} onClick={() => void act(r.id, 'dismiss')}>
+  1094→  1094→                    <X className="h-3.5 w-3.5" /> {t('action_dismiss')}
+  1095→  1095→                  </Button>
+  1096→  1096→                  <Button size="sm" variant="outline" className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 hover:text-amber-200" disabled={busyId === r.id} onClick={() => void act(r.id, 'ban7')}>
+  1097→  1097→                    <Ban className="h-3.5 w-3.5" /> {t('action_ban7')}
+  1098→  1098→                  </Button>
+  1099→  1099→                  <Button size="sm" variant="destructive" disabled={busyId === r.id} onClick={() => void act(r.id, 'banPerm')}>
+  1100→  1100→                    <Ban className="h-3.5 w-3.5" /> {t('action_ban_perm')}
+  1101→  1101→                  </Button>
+  1102→  1102→                </div>
+  1103→  1103→              )}
+  1104→  1104→            </div>
+  1105→  1105→          ))}
+  1106→  1106→        </div>
+  1107→  1107→      )}
+  1108→  1108→    </div>
+  1109→  1109→  );
+  1110→  1110→}
+  1111→  1111→
+  1112→  1112→/* --------------------------------- Content --------------------------------- */
+  1113→  1113→
+  1114→  1114→interface AnnForm { titleFa: string; titleEn: string; titleAr: string; titleTr: string; bodyFa: string; bodyEn: string; bodyAr: string; bodyTr: string }
+  1115→  1115→
+  1116→  1116→const ANN_FIELDS: { key: keyof AnnForm; label: string; dir: 'rtl' | 'ltr'; max: number }[] = [
+  1117→  1117→  { key: 'titleFa', label: 'عنوان فارسی · Title FA', dir: 'rtl', max: 120 },
+  1118→  1118→  { key: 'titleEn', label: 'عنوان انگلیسی · Title EN', dir: 'ltr', max: 120 },
+  1119→  1119→  { key: 'titleAr', label: 'عنوان عربی · Title AR', dir: 'rtl', max: 120 },
+  1120→  1120→  { key: 'titleTr', label: 'عنوان ترکی · Title TR', dir: 'ltr', max: 120 },
+  1121→  1121→  { key: 'bodyFa', label: 'متن فارسی · Body FA', dir: 'rtl', max: 500 },
+  1122→  1122→  { key: 'bodyEn', label: 'متن انگلیسی · Body EN', dir: 'ltr', max: 500 },
+  1123→  1123→  { key: 'bodyAr', label: 'متن عربی · Body AR', dir: 'rtl', max: 500 },
+  1124→  1124→  { key: 'bodyTr', label: 'متن ترکی · Body TR', dir: 'ltr', max: 500 },
+  1125→  1125→];
+  1126→  1126→
+  1127→  1127→function AnnounceDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  1128→  1128→  const { t } = useApp();
+  1129→  1129→  const [form, setForm] = useState<AnnForm>({ titleFa: '', titleEn: '', titleAr: '', titleTr: '', bodyFa: '', bodyEn: '', bodyAr: '', bodyTr: '' });
+  1130→  1130→  const [kind, setKind] = useState<'INFO' | 'EVENT' | 'WARNING'>('INFO');
+  1131→  1131→  const [busy, setBusy] = useState(false);
+  1132→  1132→  const valid = ANN_FIELDS.every((f) => form[f.key].trim().length >= 2);
+  1133→  1133→
+  1134→  1134→  const submit = async () => {
+  1135→  1135→    if (!valid) return;
+  1136→  1136→    setBusy(true);
+  1137→  1137→    try {
+  1138→  1138→      await api.post('/api/admin/announcements', { ...form, kind });
+  1139→  1139→      toast.success(t('success'));
+  1140→  1140→      onCreated();
+  1141→  1141→      onClose();
+  1142→  1142→    } catch {
+  1143→  1143→      toast.error(t('error'));
+  1144→  1144→    } finally {
+  1145→  1145→      setBusy(false);
+  1146→  1146→    }
+  1147→  1147→  };
+  1148→  1148→
+  1149→  1149→  return (
+  1150→  1150→    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+  1151→  1151→      <DialogContent className="royal-card sm:max-w-lg">
+  1152→  1152→        <DialogHeader>
+  1153→  1153→          <DialogTitle className="flex items-center gap-2 gold-text"><Megaphone className="h-5 w-5 text-amber-400" /> {t('announce')}</DialogTitle>
+  1154→  1154→        </DialogHeader>
+  1155→  1155→        <p className="text-xs text-muted-foreground">{t('announce_hint')}</p>
+  1156→  1156→        <div className="grid gap-2.5 sm:grid-cols-2">
+  1157→  1157→          {ANN_FIELDS.map((f) => (
+  1158→  1158→            <label key={f.key} className="space-y-1">
+  1159→  1159→              <span className="text-[11px] text-muted-foreground">{f.label}</span>
+  1160→  1160→              <Input
+  1161→  1161→                dir={f.dir}
+  1162→  1162→                maxLength={f.max}
+  1163→  1163→                value={form[f.key]}
+  1164→  1164→                onChange={(e) => setForm((p) => ({ ...p, [f.key]: e.target.value }))}
+  1165→  1165→              />
+  1166→  1166→            </label>
+  1167→  1167→          ))}
+  1168→  1168→        </div>
+  1169→  1169→        <div className="space-y-1">
+  1170→  1170→          <span className="text-[11px] text-muted-foreground">نوع · Kind</span>
+  1171→  1171→          <Select value={kind} onValueChange={(v) => setKind(v as typeof kind)}>
+  1172→  1172→            <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+  1173→  1173→            <SelectContent>
+  1174→  1174→              {(['INFO', 'EVENT', 'WARNING'] as const).map((k) => (
+  1175→  1175→                <SelectItem key={k} value={k}>{KIND_LABEL[k]}</SelectItem>
+  1176→  1176→              ))}
+  1177→  1177→            </SelectContent>
+  1178→  1178→          </Select>
+  1179→  1179→        </div>
+  1180→  1180→        <Button className="w-full glow-gold" disabled={busy || !valid} onClick={() => void submit()}>
+  1181→  1181→          {t('confirm')}
+  1182→  1182→        </Button>
+  1183→  1183→      </DialogContent>
+  1184→  1184→    </Dialog>
+  1185→  1185→  );
+  1186→  1186→}
+  1187→  1187→
+  1188→  1188→function ContentTab() {
+  1189→  1189→  const { t, locale } = useApp();
+  1190→  1190→  const words = useAdminData<{ words: BannedWordRow[] }>('/api/admin/words');
+  1191→  1191→  const anns = useAdminData<{ announcements: AnnouncementRow[] }>('/api/admin/announcements');
+  1192→  1192→  const [newWord, setNewWord] = useState('');
+  1193→  1193→  const [sev, setSev] = useState('2');
+  1194→  1194→  const [adding, setAdding] = useState(false);
+  1195→  1195→  const [annOpen, setAnnOpen] = useState(false);
+  1196→  1196→
+  1197→  1197→  const wordList = words.data?.words ?? [];
+  1198→  1198→  const annList = anns.data?.announcements ?? [];
+  1199→  1199→
+  1200→  1200→  const addWord = async () => {
+  1201→  1201→    const w = newWord.trim().toLowerCase();
+  1202→  1202→    if (w.length < 2) return;
+  1203→  1203→    setAdding(true);
+  1204→  1204→    try {
+  1205→  1205→      await api.post('/api/admin/words', { word: w, severity: Number(sev) });
+  1206→  1206→      toast.success(t('success'));
+  1207→  1207→      setNewWord('');
+  1208→  1208→      words.refresh();
+  1209→  1209→    } catch {
+  1210→  1210→      toast.error(t('error'));
+  1211→  1211→    } finally {
+  1212→  1212→      setAdding(false);
+  1213→  1213→    }
+  1214→  1214→  };
+  1215→  1215→
+  1216→  1216→  const delWord = async (id: string) => {
+  1217→  1217→    try {
+  1218→  1218→      await api.del(`/api/admin/words?id=${encodeURIComponent(id)}`);
+  1219→  1219→      toast.success(t('success'));
+  1220→  1220→      words.refresh();
+  1221→  1221→    } catch {
+  1222→  1222→      toast.error(t('error'));
+  1223→  1223→    }
+  1224→  1224→  };
+  1225→  1225→
+  1226→  1226→  const toggleAnn = async (a: AnnouncementRow, active: boolean) => {
+  1227→  1227→    anns.patch((d) => ({ ...d, announcements: d.announcements.map((x) => (x.id === a.id ? { ...x, active } : x)) }));
+  1228→  1228→    try {
+  1229→  1229→      await api.patch('/api/admin/announcements', { id: a.id, active });
+  1230→  1230→      toast.success(t('success'));
+  1231→  1231→    } catch {
+  1232→  1232→      toast.error(t('error'));
+  1233→  1233→      anns.refresh();
+  1234→  1234→    }
+  1235→  1235→  };
+  1236→  1236→
+  1237→  1237→  const pickTitle = (a: AnnouncementRow) => ({ fa: a.titleFa, en: a.titleEn, ar: a.titleAr, tr: a.titleTr }[locale] ?? a.titleFa);
+  1238→  1238→  const pickBody = (a: AnnouncementRow) => ({ fa: a.bodyFa, en: a.bodyEn, ar: a.bodyAr, tr: a.bodyTr }[locale] ?? a.bodyFa);
+  1239→  1239→
+  1240→  1240→  return (
+  1241→  1241→    <div className="grid gap-4 md:grid-cols-2">
+  1242→  1242→      {/* word filter */}
+  1243→  1243→      <div className="royal-card rounded-2xl p-4">
+  1244→  1244→        <h3 className="mb-3 flex items-center gap-2 text-sm font-black"><Filter className="h-4 w-4 text-sky-400" /> {t('words_title')}</h3>
+  1245→  1245→        <div className="mb-3 flex flex-wrap gap-2">
+  1246→  1246→          <Input
+  1247→  1247→            value={newWord}
+  1248→  1248→            onChange={(e) => setNewWord(e.target.value)}
+  1249→  1249→            onKeyDown={(e) => { if (e.key === 'Enter') void addWord(); }}
+  1250→  1250→            placeholder="واژهٔ تازه · new word"
+  1251→  1251→            maxLength={40}
+  1252→  1252→            className="min-w-32 flex-1"
+  1253→  1253→          />
+  1254→  1254→          <Select value={sev} onValueChange={setSev}>
+  1255→  1255→            <SelectTrigger className="w-32 shrink-0" aria-label={t('severity')}><SelectValue /></SelectTrigger>
+  1256→  1256→            <SelectContent>
+  1257→  1257→              {['1', '2', '3'].map((s) => (
+  1258→  1258→                <SelectItem key={s} value={s}>{t(`sev_${s}` as TKey)}</SelectItem>
+  1259→  1259→              ))}
+  1260→  1260→            </SelectContent>
+  1261→  1261→          </Select>
+  1262→  1262→          <Button className="shrink-0" disabled={newWord.trim().length < 2 || adding} onClick={() => void addWord()}>
+  1263→  1263→            <Plus className="h-4 w-4" /> {t('add_word')}
+  1264→  1264→          </Button>
+  1265→  1265→        </div>
+  1266→  1266→        {words.loading && !words.data ? <ListSkeleton rows={5} /> : wordList.length === 0 ? (
+  1267→  1267→          <EmptyHint>واژه‌ای نیست · No words</EmptyHint>
+  1268→  1268→        ) : (
+  1269→  1269→          <div className="max-h-80 space-y-1.5 overflow-y-auto nice-scroll pe-1">
+  1270→  1270→            {wordList.map((w) => (
+  1271→  1271→              <div key={w.id} className="flex items-center gap-2 rounded-xl bg-white/[.04] px-3 py-2">
+  1272→  1272→                <span className="text-sm font-bold" dir="ltr">{w.word}</span>
+  1273→  1273→                <Badge variant="outline" className={`ms-auto shrink-0 text-[10px] ${SEV_STYLE[w.severity] ?? ''}`}>
+  1274→  1274→                  {t(`sev_${w.severity}` as TKey)}
+  1275→  1275→                </Badge>
+  1276→  1276→                <Button
+  1277→  1277→                  variant="ghost"
+  1278→  1278→                  size="icon"
+  1279→  1279→                  className="h-7 w-7 shrink-0 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+  1280→  1280→                  onClick={() => void delWord(w.id)}
+  1281→  1281→                  aria-label={`delete ${w.word}`}
+  1282→  1282→                >
+  1283→  1283→                  <Trash2 className="h-3.5 w-3.5" />
+  1284→  1284→                </Button>
+  1285→  1285→              </div>
+  1286→  1286→            ))}
+  1287→  1287→          </div>
+  1288→  1288→        )}
+  1289→  1289→      </div>
+  1290→  1290→
+  1291→  1291→      {/* announcements */}
+  1292→  1292→      <div className="royal-card rounded-2xl p-4">
+  1293→  1293→        <div className="mb-3 flex items-center justify-between gap-2">
+  1294→  1294→          <h3 className="flex items-center gap-2 text-sm font-black"><Megaphone className="h-4 w-4 text-amber-400" /> اطلاعیه‌ها · Announcements</h3>
+  1295→  1295→          <Button size="sm" variant="outline" className="border-amber-400/40 text-amber-300 hover:bg-amber-400/10 hover:text-amber-200" onClick={() => setAnnOpen(true)}>
+  1296→  1296→            <Plus className="h-4 w-4" /> {t('announce')}
+  1297→  1297→          </Button>
+  1298→  1298→        </div>
+  1299→  1299→        {anns.loading && !anns.data ? <ListSkeleton rows={4} /> : annList.length === 0 ? (
+  1300→  1300→          <EmptyHint>اطلاعیه‌ای نیست · No announcements</EmptyHint>
+  1301→  1301→        ) : (
+  1302→  1302→          <div className="max-h-96 space-y-2 overflow-y-auto nice-scroll pe-1">
+  1303→  1303→            {annList.map((a) => (
+  1304→  1304→              <div key={a.id} className="rounded-xl bg-white/[.04] p-3">
+  1305→  1305→                <div className="flex flex-wrap items-center gap-2">
+  1306→  1306→                  <span className="text-sm font-bold">{pickTitle(a)}</span>
+  1307→  1307→                  <Badge variant="outline" className={`text-[10px] ${KIND_STYLE[a.kind] ?? ''}`}>{KIND_LABEL[a.kind] ?? a.kind}</Badge>
+  1308→  1308→                  <div className="ms-auto flex items-center gap-2">
+  1309→  1309→                    <span className="text-[10px] text-muted-foreground">{fmtDate(a.createdAt, locale)}</span>
+  1310→  1310→                    <Switch checked={a.active} onCheckedChange={(v) => void toggleAnn(a, v)} aria-label={`announce ${a.id}`} />
+  1311→  1311→                  </div>
+  1312→  1312→                </div>
+  1313→  1313→                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground" dir="auto">{pickBody(a)}</p>
+  1314→  1314→              </div>
+  1315→  1315→            ))}
+  1316→  1316→          </div>
+  1317→  1317→        )}
+  1318→  1318→      </div>
+  1319→  1319→
+  1320→  1320→      {annOpen && <AnnounceDialog onClose={() => setAnnOpen(false)} onCreated={anns.refresh} />}
+  1321→  1321→    </div>
+  1322→  1322→  );
+  1323→  1323→}
+  1324→  1324→
+  1325→  1325→/* ---------------------------------- Store ---------------------------------- */
+  1326→  1326→
+  1327→  1327→function StoreTab() {
+  1328→  1328→  const { t, locale } = useApp();
+  1329→  1329→  const fmt = (n: number) => localizeDigits(n, locale);
+  1330→  1330→  const { data, patch, loading, refresh } = useAdminData<{ items: ItemRow[] }>('/api/admin/items');
+  1331→  1331→  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  1332→  1332→  const items = data?.items ?? [];
+  1333→  1333→
+  1334→  1334→  const savePrice = async (it: ItemRow) => {
+  1335→  1335→    const raw = drafts[it.code];
+  1336→  1336→    if (raw === undefined || !Number.isFinite(Number(raw))) return;
+  1337→  1337→    const price = Math.max(0, Math.floor(Number(raw)));
+  1338→  1338→    try {
+  1339→  1339→      await api.post('/api/admin/items', { code: it.code, price });
+  1340→  1340→      patch((d) => ({ ...d, items: d.items.map((x) => (x.code === it.code ? { ...x, price } : x)) }));
+  1341→  1341→      setDrafts((dr) => { const n = { ...dr }; delete n[it.code]; return n; });
+  1342→  1342→      toast.success(`${it.code} — ${t('success')}`);
+  1343→  1343→    } catch {
+  1344→  1344→      toast.error(t('error'));
+  1345→  1345→    }
+  1346→  1346→  };
+  1347→  1347→
+  1348→  1348→  const toggleActive = async (it: ItemRow, active: boolean) => {
+  1349→  1349→    patch((d) => ({ ...d, items: d.items.map((x) => (x.code === it.code ? { ...x, active } : x)) }));
+  1350→  1350→    try {
+  1351→  1351→      await api.post('/api/admin/items', { code: it.code, active });
+  1352→  1352→      toast.success(t('success'));
+  1353→  1353→    } catch {
+  1354→  1354→      toast.error(t('error'));
+  1355→  1355→      refresh();
+  1356→  1356→    }
+  1357→  1357→  };
+  1358→  1358→
+  1359→  1359→  return loading && !data ? <ListSkeleton rows={6} /> : (
+  1360→  1360→    <div className="royal-card rounded-2xl">
+  1361→  1361→      <div className="overflow-x-auto nice-scroll">
+  1362→  1362→        <Table className="min-w-[760px]">
+  1363→  1363→          <TableHeader>
+  1364→  1364→            <TableRow className="border-amber-500/15 hover:bg-transparent">
+  1365→  1365→              <TableHead>کد · Code</TableHead>
+  1366→  1366→              <TableHead>دسته · Category</TableHead>
+  1367→  1367→              <TableHead>کمیابی · Rarity</TableHead>
+  1368→  1368→              <TableHead>قیمت · Price</TableHead>
+  1369→  1369→              <TableHead>فعال · Active</TableHead>
+  1370→  1370→              <TableHead>خریداران · Buyers</TableHead>
+  1371→  1371→            </TableRow>
+  1372→  1372→          </TableHeader>
+  1373→  1373→          <TableBody>
+  1374→  1374→            {items.map((it) => {
+  1375→  1375→              const raw = drafts[it.code];
+  1376→  1376→              const changed = raw !== undefined && raw !== String(it.price) && Number.isFinite(Number(raw)) && Number(raw) >= 0;
+  1377→  1377→              return (
+  1378→  1378→                <TableRow key={it.code} className="border-amber-500/10">
+  1379→  1379→                  <TableCell className="font-bold" dir="ltr">{it.code}</TableCell>
+  1380→  1380→                  <TableCell className="text-xs text-muted-foreground">{t(`cat_${it.category}` as TKey)}</TableCell>
+  1381→  1381→                  <TableCell>
+  1382→  1382→                    <Badge variant="outline" className={RARITY_STYLE[it.rarity] ?? ''}>{t(`rarity_${it.rarity}` as TKey)}</Badge>
+  1383→  1383→                  </TableCell>
+  1384→  1384→                  <TableCell>
+  1385→  1385→                    <div className="flex items-center gap-1.5">
+  1386→  1386→                      <Input
+  1387→  1387→                        dir="ltr"
+  1388→  1388→                        type="number"
+  1389→  1389→                        min={0}
+  1390→  1390→                        max={100000}
+  1391→  1391→                        className="h-8 w-24"
+  1392→  1392→                        value={raw ?? String(it.price)}
+  1393→  1393→                        onChange={(e) => setDrafts((d) => ({ ...d, [it.code]: e.target.value }))}
+  1394→  1394→                        aria-label={`price ${it.code}`}
+  1395→  1395→                      />
+  1396→  1396→                      <Button
+  1397→  1397→                        variant="ghost"
+  1398→  1398→                        size="icon"
+  1399→  1399→                        className="h-8 w-8 text-emerald-300 hover:bg-emerald-500/10 hover:text-emerald-200"
+  1400→  1400→                        disabled={!changed}
+  1401→  1401→                        onClick={() => void savePrice(it)}
+  1402→  1402→                        aria-label={`save price ${it.code}`}
+  1403→  1403→                      >
+  1404→  1404→                        <Check className="h-4 w-4" />
+  1405→  1405→                      </Button>
+  1406→  1406→                    </div>
+  1407→  1407→                  </TableCell>
+  1408→  1408→                  <TableCell>
+  1409→  1409→                    <Switch checked={it.active} onCheckedChange={(v) => void toggleActive(it, v)} aria-label={`active ${it.code}`} />
+  1410→  1410→                  </TableCell>
+  1411→  1411→                  <TableCell className="font-bold">{fmt(it.purchasedBy)}</TableCell>
+  1412→  1412→                </TableRow>
+  1413→  1413→              );
+  1414→  1414→            })}
+  1415→  1415→            {items.length === 0 && (
+  1416→  1416→              <TableRow>
+  1417→  1417→                <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">آیتمی نیست · No items</TableCell>
+  1418→  1418→              </TableRow>
+  1419→  1419→            )}
+  1420→  1420→          </TableBody>
+  1421→  1421→        </Table>
+  1422→  1422→      </div>
+  1423→  1423→    </div>
+  1424→  1424→  );
+  1425→  1425→}
+  1426→  1426→
+  1427→  1427→/* --------------------------------- Chats ----------------------------------- */
+  1428→  1428→
+  1429→  1429→function ChatsTab() {
+  1430→  1430→  const { locale } = useApp();
+  1431→  1431→  const [flaggedOnly, setFlaggedOnly] = useState(true);
+  1432→  1432→  const { data, loading } = useAdminData<{ chats: ChatRow[] }>(`/api/admin/items?view=chats&flagged=${flaggedOnly ? 1 : 0}`);
+  1433→  1433→  const chats = data?.chats ?? [];
+  1434→  1434→
+  1435→  1435→  return (
+  1436→  1436→    <div className="space-y-3">
+  1437→  1437→      <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[.04] px-3 py-2">
+  1438→  1438→        <span className="text-sm font-bold">فقط پیام‌های پرچم‌خورده · Flagged only</span>
+  1439→  1439→        <Switch checked={flaggedOnly} onCheckedChange={setFlaggedOnly} aria-label="flagged only" />
+  1440→  1440→      </div>
+  1441→  1441→
+  1442→  1442→      {loading && !data ? <ListSkeleton rows={6} /> : chats.length === 0 ? (
+  1443→  1443→        <EmptyHint>پیامی نیست · No messages</EmptyHint>
+  1444→  1444→      ) : (
+  1445→  1445→        <div className="space-y-2">
+  1446→  1446→          {chats.map((c) => {
+  1447→  1447→            const flags = c.flaggedWords.split(/[,،]/).map((s) => s.trim()).filter(Boolean);
+  1448→  1448→            return (
+  1449→  1449→              <div key={c.id} className="royal-card rounded-xl p-3">
+  1450→  1450→                <div className="flex flex-wrap items-center gap-2 text-xs">
+  1451→  1451→                  <MessageSquare className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+  1452→  1452→                  <b>{c.sender?.username ?? c.senderName}</b>
+  1453→  1453→                  {c.sender?.banned && <Badge variant="outline" className="border-rose-400/40 bg-rose-500/15 text-[9px] text-rose-300">مسدود · Banned</Badge>}
+  1454→  1454→                  {c.masked && <Badge variant="outline" className="border-amber-400/40 bg-amber-500/10 text-[9px] text-amber-300">پالایش‌شده · Masked</Badge>}
+  1455→  1455→                  <span className="ms-auto text-[10px] text-muted-foreground">{fmtDateTime(c.createdAt, locale)}</span>
+  1456→  1456→                </div>
+  1457→  1457→                <p className="mt-1.5 text-sm leading-relaxed" dir="auto">{c.text}</p>
+  1458→  1458→                <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[10px]">
+  1459→  1459→                  <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted-foreground">اتاق · Room: {c.roomId || '—'}</span>
+  1460→  1460→                  {flags.map((fw) => (
+  1461→  1461→                    <span key={fw} className="rounded bg-rose-500/15 px-1.5 py-0.5 text-rose-300" dir="ltr">{fw}</span>
+  1462→  1462→                  ))}
+  1463→  1463→                </div>
+  1464→  1464→              </div>
+  1465→  1465→            );
+  1466→  1466→          })}
+  1467→  1467→        </div>
+  1468→  1468→      )}
+  1469→  1469→    </div>
+  1470→  1470→  );
+  1471→  1471→}
+  1472→  1472→
+  1473→  1473→/* ---------------------------------- root ----------------------------------- */
+  1474→  1474→
+  1475→  1475→export function AdminView() {
+  1476→  1476→  const { t, user } = useApp();
+  1477→  1477→
+  1478→  1478→  /* lock screen for non-admins (shell also guards) */
+  1479→  1479→  if (!user || user.role !== 'ADMIN') {
+  1480→  1480→    return (
+  1481→  1481→      <div className="grid place-items-center px-4 py-28 text-center">
+  1482→  1482→        <div className="royal-card rounded-3xl p-10">
+  1483→  1483→          <Shield className="mx-auto mb-3 h-12 w-12 text-amber-400" />
+  1484→  1484→          <p className="text-lg font-black gold-text">{t('admin_title')}</p>
+  1485→  1485→          <p className="mt-2 text-sm text-muted-foreground">🔒 {t('admin_only')}</p>
+  1486→  1486→        </div>
+  1487→  1487→      </div>
+  1488→  1488→    );
+  1489→  1489→  }
+  1490→  1490→
+  1491→  1491→  return (
+  1492→  1492→    <div className="mx-auto w-full max-w-6xl px-4 pb-10">
+  1493→  1493→      {/* sticky sub-header */}
+  1494→  1494→      <div className="sticky top-14 z-20 -mx-4 border-b border-amber-500/15 bg-background/80 px-4 py-2.5 backdrop-blur-md md:top-[96px]">
+  1495→  1495→        <div className="flex items-center gap-2">
+  1496→  1496→          <Shield className="h-5 w-5 text-amber-400 glow-gold" />
+  1497→  1497→          <h1 className="text-base font-black gold-text sm:text-lg">{t('admin_title')}</h1>
+  1498→  1498→          <span className="ms-auto hidden items-center gap-1 rounded-full border border-amber-400/30 bg-amber-400/10 px-2.5 py-1 text-[10px] font-bold text-amber-300 sm:flex">
+  1499→  1499→            <Shield className="h-3 w-3" /> ADMIN
+  1500→  1500→          </span>
+  1501→  1501→        </div>
+  1502→  1502→      </div>
+  1503→  1503→
+  1504→  1504→      <Tabs defaultValue="overview" className="mt-4">
+  1505→  1505→        <TabsList className="h-auto w-full justify-start gap-1 overflow-x-auto nice-scroll sm:w-fit">
+  1506→  1506→          <TabsTrigger value="overview" className="flex-none">{t('admin_overview')}</TabsTrigger>
+  1507→  1507→          <TabsTrigger value="users" className="flex-none">{t('admin_users')}</TabsTrigger>
+  1508→  1508→          <TabsTrigger value="reports" className="flex-none">{t('admin_reports')}</TabsTrigger>
+  1509→  1509→          <TabsTrigger value="content" className="flex-none">{t('admin_content')}</TabsTrigger>
+  1510→  1510→          <TabsTrigger value="store" className="flex-none">{t('admin_items')}</TabsTrigger>
+  1511→  1511→          <TabsTrigger value="chats" className="flex-none">{t('admin_chat')}</TabsTrigger>
+  1512→  1512→        </TabsList>
+  1513→  1513→        <TabsContent value="overview" className="mt-4"><OverviewTab /></TabsContent>
+  1514→  1514→        <TabsContent value="users" className="mt-4"><UsersTab /></TabsContent>
+  1515→  1515→        <TabsContent value="reports" className="mt-4"><ReportsTab /></TabsContent>
+  1516→  1516→        <TabsContent value="content" className="mt-4"><ContentTab /></TabsContent>
+  1517→  1517→        <TabsContent value="store" className="mt-4"><StoreTab /></TabsContent>
+  1518→  1518→        <TabsContent value="chats" className="mt-4"><ChatsTab /></TabsContent>
+  1519→  1519→      </Tabs>
+  1520→  1520→    </div>
+  1521→  1521→  );
+  1522→  1522→}
+  1523→  1523→

@@ -1,0 +1,651 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * StellarGame — "Stellar Forge" (کورهٔ ستارگان)
+     5→     5→ *
+     6→     6→ * A stellar-nucleosynthesis merge puzzle: pick a gravity direction, all tiles
+     7→     7→ * slide (2048 rules), equal elements fuse up the REAL stellar chain
+     8→     8→ * H → He → C → O → Ne → Si → Fe. Score = "mass forged" ((level)² × 2 per merge).
+     9→     9→ * Forging iron detonates a SUPERNOVA: +250, screen flash/shockwave, the grid
+    10→    10→ * clears and the next star accretes 3 H per move. Star epochs (protostar →
+    11→    11→ * supergiant) rise with mass. Includes a science codex (Burbidge et al. 1957).
+    12→    12→ */
+    13→    13→
+    14→    14→import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+    15→    15→import { useApp } from '@/store/app';
+    16→    16→import { localizeDigits, type Locale } from '@/lib/i18n';
+    17→    17→import { sfx } from '@/lib/sound';
+    18→    18→import { useArcadeFinish, ArcadeResultModal } from '@/lib/arcade-client';
+    19→    19→import { Button } from '@/components/ui/button';
+    20→    20→import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    21→    21→import {
+    22→    22→  BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Flame, RotateCcw, Sparkles, Star, X, Zap,
+    23→    23→} from 'lucide-react';
+    24→    24→import {
+    25→    25→  BASE_SPAWN, CELLS, COLS, CODEX_CREDIT, ELEMENTS, EPOCHS, MOVE_THROTTLE_MS, NOVA_SPAWN,
+    26→    26→  SF_TEXT, STAGES, SUPERNOVA_BONUS, epochForScore, hasMoves, initialBoard, slide, spawnRandom,
+    27→    27→  type Cell, type Dir, type EpochDef, type StellarTile,
+    28→    28→} from '@/lib/game/stellar-data';
+    29→    29→
+    30→    30→/* ------------------------------ styling ------------------------------- */
+    31→    31→
+    32→    32→const SF_CSS = `
+    33→    33→.sf-shell{background:
+    34→    34→  radial-gradient(120% 90% at 50% 0%, rgba(249,115,22,.14), transparent 60%),
+    35→    35→  radial-gradient(130% 120% at 50% 115%, rgba(127,29,29,.38), transparent 55%),
+    36→    36→  linear-gradient(180deg,#180a04 0%,#0d0503 60%,#080302 100%);}
+    37→    37→.sf-shimmer-a,.sf-shimmer-b{position:absolute;inset:-18%;pointer-events:none;}
+    38→    38→.sf-shimmer-a{background:radial-gradient(46% 34% at 30% 28%,rgba(251,146,60,.16),transparent 70%);animation:sf-shimmer-a 7s ease-in-out infinite alternate;}
+    39→    39→.sf-shimmer-b{background:radial-gradient(40% 30% at 72% 66%,rgba(248,113,113,.14),transparent 70%);animation:sf-shimmer-b 9.5s ease-in-out infinite alternate;}
+    40→    40→@keyframes sf-shimmer-a{from{opacity:.35;transform:scale(1) translateY(0)}to{opacity:.95;transform:scale(1.09) translateY(2%)}}
+    41→    41→@keyframes sf-shimmer-b{from{opacity:.95;transform:scale(1.06)}to{opacity:.3;transform:scale(1)}}
+    42→    42→.sf-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(125% 105% at 50% 42%,transparent 52%,rgba(0,0,0,.58) 100%);}
+    43→    43→
+    44→    44→.sf-grid{--sf-gap:6px;display:grid;grid-template-columns:repeat(5,1fr);grid-template-rows:repeat(6,1fr);gap:var(--sf-gap);position:relative;}
+    45→    45→.sf-cell{border-radius:12px;background:rgba(255,255,255,.035);box-shadow:inset 0 0 0 1px rgba(255,255,255,.03);}
+    46→    46→.sf-tile{position:absolute;left:0;top:0;z-index:10;pointer-events:none;
+    47→    47→  width:calc((100% - 4*var(--sf-gap))/5);height:calc((100% - 5*var(--sf-gap))/6);
+    48→    48→  transform:translate(calc(var(--c)*(100% + var(--sf-gap))),calc(var(--r)*(100% + var(--sf-gap))));
+    49→    49→  transition:transform 120ms ease;}
+    50→    50→.sf-ghost{z-index:9;}
+    51→    51→.sf-pop{position:absolute;inset:0;}
+    52→    52→.sf-pop.sf-merged{animation:sf-pop 300ms cubic-bezier(.2,1.4,.4,1) both;}
+    53→    53→.sf-pop.sf-spawned{animation:sf-spawn 320ms cubic-bezier(.2,1.3,.4,1) both;}
+    54→    54→@keyframes sf-pop{0%{transform:scale(.55)}60%{transform:scale(1.14)}100%{transform:scale(1)}}
+    55→    55→@keyframes sf-spawn{0%{transform:scale(.25);opacity:0}70%{transform:scale(1.08);opacity:1}100%{transform:scale(1)}}
+    56→    56→.sf-face{position:absolute;inset:0;border-radius:14px;display:flex;align-items:center;justify-content:center;font-weight:900;
+    57→    57→  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -8px 16px rgba(0,0,0,.18),0 4px 14px rgba(0,0,0,.45),0 0 14px var(--sf-glow,transparent);
+    58→    58→  animation:sf-float var(--sf-fl-dur,3.4s) ease-in-out var(--sf-fl-del,0s) infinite;}
+    59→    59→.sf-ghost .sf-face{animation:sf-ghostfade 150ms ease-out both;}
+    60→    60→@keyframes sf-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-2.5px)}}
+    61→    61→@keyframes sf-ghostfade{from{opacity:.95}to{opacity:0;transform:scale(.7)}}
+    62→    62→.sf-ring{position:absolute;inset:-2px;border-radius:16px;border:2px solid rgba(255,255,255,.9);animation:sf-ring 420ms ease-out both;}
+    63→    63→@keyframes sf-ring{from{opacity:.9;transform:scale(.75)}to{opacity:0;transform:scale(1.55)}}
+    64→    64→.sf-fe .sf-face{animation:sf-float var(--sf-fl-dur,3.4s) ease-in-out var(--sf-fl-del,0s) infinite,sf-fe-pulse 1.2s ease-in-out infinite;}
+    65→    65→@keyframes sf-fe-pulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.28)}}
+    66→    66→
+    67→    67→.sf-nova{position:fixed;inset:0;z-index:40;pointer-events:none;overflow:hidden;}
+    68→    68→.sf-nova-flash{position:absolute;inset:0;background:radial-gradient(60% 60% at 50% 50%,#fff7ed,#fed7aa 45%,transparent 75%);animation:sf-flash 850ms ease-out both;}
+    69→    69→.sf-nova-ring{position:absolute;left:50%;top:50%;width:140px;height:140px;margin:-70px 0 0 -70px;border-radius:9999px;
+    70→    70→  border:6px solid rgba(253,186,116,.9);box-shadow:0 0 60px 20px rgba(251,146,60,.65),inset 0 0 40px rgba(255,237,213,.8);
+    71→    71→  animation:sf-shock 850ms cubic-bezier(.15,.6,.3,1) both;}
+    72→    72→.sf-nova-ring2{border-width:3px;border-color:rgba(255,255,255,.85);animation-delay:90ms;}
+    73→    73→@keyframes sf-flash{0%{opacity:0}18%{opacity:.95}100%{opacity:0}}
+    74→    74→@keyframes sf-shock{0%{opacity:1;transform:scale(.15)}100%{opacity:0;transform:scale(3.2)}}
+    75→    75→.sf-nova-text{position:absolute;left:0;right:0;top:38%;text-align:center;animation:sf-novatext 1100ms ease-out both;}
+    76→    76→.sf-nova-text b{display:block;font-size:clamp(1.6rem,7vw,2.6rem);font-weight:900;color:#fdba74;text-shadow:0 0 24px rgba(251,146,60,.9),0 2px 6px rgba(0,0,0,.6);}
+    77→    77→.sf-nova-text small{display:block;margin-top:.35rem;max-width:34ch;margin-inline:auto;font-size:.78rem;color:#fed7aa;text-shadow:0 1px 4px rgba(0,0,0,.7);}
+    78→    78→@keyframes sf-novatext{0%{opacity:0;transform:scale(.6)}22%{opacity:1;transform:scale(1.12)}70%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(1.04)}}
+    79→    79→
+    80→    80→@media (prefers-reduced-motion:reduce){
+    81→    81→  .sf-shimmer-a,.sf-shimmer-b,.sf-face,.sf-ghost .sf-face,.sf-pop.sf-merged,.sf-pop.sf-spawned,.sf-ring,.sf-fe .sf-face{animation:none !important;}
+    82→    82→  .sf-tile{transition:none;}
+    83→    83→}
+    84→    84→`;
+    85→    85→
+    86→    86→const DPAD_ICONS: Record<Dir, typeof ChevronUp> = {
+    87→    87→  up: ChevronUp,
+    88→    88→  down: ChevronDown,
+    89→    89→  left: ChevronLeft,
+    90→    90→  right: ChevronRight,
+    91→    91→};
+    92→    92→
+    93→    93→/* --------------------------- tile face -------------------------------- */
+    94→    94→
+    95→    95→function TileFace({ tile, locale }: { tile: StellarTile; locale: Locale }) {
+    96→    96→  const el = ELEMENTS[tile.level - 1];
+    97→    97→  return (
+    98→    98→    <div
+    99→    99→      className="sf-face"
+   100→   100→      dir="ltr"
+   101→   101→      style={{
+   102→   102→        background: `radial-gradient(circle at 32% 26%, ${el.light} 0%, ${el.mid} 52%, ${el.deep} 100%)`,
+   103→   103→        color: el.ink,
+   104→   104→        '--sf-glow': el.glow,
+   105→   105→        '--sf-fl-dur': `${3 + (tile.level % 4) * 0.35}s`,
+   106→   106→        '--sf-fl-del': `${((tile.id % 7) * 0.4).toFixed(2)}s`,
+   107→   107→      } as CSSProperties}
+   108→   108→    >
+   109→   109→      <span className="absolute start-1 top-0.5 text-[9px] font-bold opacity-80">{localizeDigits(tile.level, locale)}</span>
+   110→   110→      <span className="select-none text-[clamp(1.05rem,4.6vw,1.7rem)] leading-none tracking-tight">{el.symbol}</span>
+   111→   111→    </div>
+   112→   112→  );
+   113→   113→}
+   114→   114→
+   115→   115→/* ------------------------------ component ----------------------------- */
+   116→   116→
+   117→   117→export function StellarGame({ onExit }: { onExit: () => void }) {
+   118→   118→  const { t, locale } = useApp();
+   119→   119→  const lang: 'fa' | 'en' = locale === 'fa' ? 'fa' : 'en';
+   120→   120→  const rtl = locale === 'fa' || locale === 'ar';
+   121→   121→
+   122→   122→  const { finish, rewards, lastScore, open: resultOpen, close: closeResult } = useArcadeFinish('stellar');
+   123→   123→
+   124→   124→  /* ---- game state (refs mirror state for stable timers/handlers) ---- */
+   125→   125→  const [board, setBoard] = useState<Cell[]>(initialBoard);
+   126→   126→  const [mergedFlags, setMergedFlags] = useState<boolean[]>(() => Array<boolean>(CELLS).fill(false));
+   127→   127→  const [spawnedIds, setSpawnedIds] = useState<number[]>([1, 2]);
+   128→   128→  const [ghosts, setGhosts] = useState<{ key: number; level: number; index: number }[]>([]);
+   129→   129→  const [score, setScore] = useState(0);
+   130→   130→  const [supernovas, setSupernovas] = useState(0);
+   131→   131→  const [star, setStar] = useState(1);
+   132→   132→  const [forged, setForged] = useState<number[]>(() => Array<number>(8).fill(0));
+   133→   133→  const [spawnedH, setSpawnedH] = useState(2);
+   134→   134→  const [maxForged, setMaxForged] = useState(1);
+   135→   135→  const [gameOver, setGameOver] = useState(false);
+   136→   136→  const [codexOpen, setCodexOpen] = useState(false);
+   137→   137→  const [nova, setNova] = useState(false);
+   138→   138→  const [novaKey, setNovaKey] = useState(0);
+   139→   139→
+   140→   140→  const boardRef = useRef<Cell[]>(initialBoard());
+   141→   141→  const scoreRef = useRef(0);
+   142→   142→  const novaCountRef = useRef(0);
+   143→   143→  const starRef = useRef(1);
+   144→   144→  const spawnedHRef = useRef(2);
+   145→   145→  const forgedRef = useRef<number[]>(Array<number>(8).fill(0));
+   146→   146→  const maxForgedRef = useRef(1);
+   147→   147→  const gameOverRef = useRef(false);
+   148→   148→  const submittedRef = useRef(false);
+   149→   149→  const codexOpenRef = useRef(false);
+   150→   150→  const busyRef = useRef(false);
+   151→   151→  const lastMoveRef = useRef(0);
+   152→   152→  const moveTickRef = useRef(0);
+   153→   153→  const idRef = useRef(3);
+   154→   154→  const epochRef = useRef<EpochDef['id']>(epochForScore(0).id);
+   155→   155→  const timersRef = useRef<number[]>([]);
+   156→   156→  const pointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
+   157→   157→
+   158→   158→  const finishRef = useRef(finish);
+   159→   159→  const closeResultRef = useRef(closeResult);
+   160→   160→  useEffect(() => {
+   161→   161→    finishRef.current = finish;
+   162→   162→    closeResultRef.current = closeResult;
+   163→   163→  });
+   164→   164→
+   165→   165→  const nextId = () => idRef.current++;
+   166→   166→
+   167→   167→  const addTimer = (id: number) => {
+   168→   168→    timersRef.current.push(id);
+   169→   169→  };
+   170→   170→
+   171→   171→  /* ---- run end: submit to the shared arcade economy ---- */
+   172→   172→  const endRun = () => {
+   173→   173→    if (submittedRef.current) return;
+   174→   174→    submittedRef.current = true;
+   175→   175→    gameOverRef.current = true;
+   176→   176→    setGameOver(true);
+   177→   177→    sfx.lose();
+   178→   178→    const meta = {
+   179→   179→      star: starRef.current,
+   180→   180→      epoch: epochForScore(scoreRef.current).id,
+   181→   181→      maxElement: ELEMENTS[maxForgedRef.current - 1].symbol,
+   182→   182→      supernovas: novaCountRef.current,
+   183→   183→    };
+   184→   184→    const finalScore = scoreRef.current;
+   185→   185→    addTimer(window.setTimeout(() => { void finishRef.current(finalScore, meta); }, 650));
+   186→   186→  };
+   187→   187→
+   188→   188→  /* ---- restart / first mount ---- */
+   189→   189→  const reset = useCallback(() => {
+   190→   190→    for (const id of timersRef.current) window.clearTimeout(id);
+   191→   191→    timersRef.current = [];
+   192→   192→    const sp = spawnRandom(Array<Cell>(CELLS).fill(null), BASE_SPAWN, nextId);
+   193→   193→    boardRef.current = sp.board;
+   194→   194→    scoreRef.current = 0;
+   195→   195→    novaCountRef.current = 0;
+   196→   196→    starRef.current = 1;
+   197→   197→    spawnedHRef.current = sp.spawned.length;
+   198→   198→    forgedRef.current = Array<number>(8).fill(0);
+   199→   199→    maxForgedRef.current = 1;
+   200→   200→    gameOverRef.current = false;
+   201→   201→    submittedRef.current = false;
+   202→   202→    busyRef.current = false;
+   203→   203→    lastMoveRef.current = 0;
+   204→   204→    moveTickRef.current = 0;
+   205→   205→    epochRef.current = epochForScore(0).id;
+   206→   206→    setBoard(sp.board);
+   207→   207→    setMergedFlags(Array<boolean>(CELLS).fill(false));
+   208→   208→    setSpawnedIds(sp.spawned.map((s) => s.id));
+   209→   209→    setGhosts([]);
+   210→   210→    setScore(0);
+   211→   211→    setSupernovas(0);
+   212→   212→    setStar(1);
+   213→   213→    setForged(Array<number>(8).fill(0));
+   214→   214→    setSpawnedH(sp.spawned.length);
+   215→   215→    setMaxForged(1);
+   216→   216→    setGameOver(false);
+   217→   217→    setNova(false);
+   218→   218→    closeResultRef.current();
+   219→   219→  }, []);
+   220→   220→
+   221→   221→  /* ---- core move (gravity slide → fuse → spawn) ---- */
+   222→   222→  const doMove = (dir: Dir) => {
+   223→   223→    if (gameOverRef.current || busyRef.current || codexOpenRef.current) return;
+   224→   224→    const now = Date.now();
+   225→   225→    if (now - lastMoveRef.current < MOVE_THROTTLE_MS) return;
+   226→   226→    lastMoveRef.current = now;
+   227→   227→
+   228→   228→    const res = slide(boardRef.current, dir);
+   229→   229→    if (!res) return; // nothing would move — invalid move
+   230→   230→
+   231→   231→    moveTickRef.current += 1;
+   232→   232→    const ghostKeys = res.absorbed.map(() => nextId());
+   233→   233→    const newGhosts = res.absorbed.map((a, i) => ({ key: ghostKeys[i], level: a.level, index: a.index }));
+   234→   234→
+   235→   235→    // mass forged
+   236→   236→    scoreRef.current += res.gained;
+   237→   237→    setScore(scoreRef.current);
+   238→   238→    if (res.absorbed.length > 0) sfx.capture();
+   239→   239→    else sfx.drop();
+   240→   240→
+   241→   241→    // forge counters
+   242→   242→    if (res.maxMergedLevel > 0) {
+   243→   243→      for (let lvl = 2; lvl <= 7; lvl++) forgedRef.current[lvl] += res.forged[lvl];
+   244→   244→      if (res.maxMergedLevel > maxForgedRef.current) maxForgedRef.current = res.maxMergedLevel;
+   245→   245→      setForged([...forgedRef.current]);
+   246→   246→      setMaxForged(maxForgedRef.current);
+   247→   247→    }
+   248→   248→
+   249→   249→    if (res.feForged > 0) {
+   250→   250→      /* -------- SUPERNOVA: iron forged → star dies, grid clears -------- */
+   251→   251→      novaCountRef.current += res.feForged;
+   252→   252→      starRef.current += res.feForged;
+   253→   253→      scoreRef.current += SUPERNOVA_BONUS * res.feForged;
+   254→   254→      setScore(scoreRef.current);
+   255→   255→      setSupernovas(novaCountRef.current);
+   256→   256→      setStar(starRef.current);
+   257→   257→      setNovaKey((k) => k + 1);
+   258→   258→      setNova(true);
+   259→   259→      sfx.win();
+   260→   260→      busyRef.current = true;
+   261→   261→      boardRef.current = res.board;
+   262→   262→      setBoard(res.board);
+   263→   263→      setMergedFlags(res.merged);
+   264→   264→      setGhosts(newGhosts);
+   265→   265→      setSpawnedIds([]);
+   266→   266→      addTimer(window.setTimeout(() => {
+   267→   267→        const sp = spawnRandom(Array<Cell>(CELLS).fill(null), NOVA_SPAWN, nextId);
+   268→   268→        spawnedHRef.current += sp.spawned.length;
+   269→   269→        boardRef.current = sp.board;
+   270→   270→        setBoard(sp.board);
+   271→   271→        setMergedFlags(Array<boolean>(CELLS).fill(false));
+   272→   272→        setSpawnedIds(sp.spawned.map((s) => s.id));
+   273→   273→        setSpawnedH(spawnedHRef.current);
+   274→   274→        setGhosts([]);
+   275→   275→        setNova(false);
+   276→   276→        busyRef.current = false;
+   277→   277→        if (!hasMoves(sp.board)) endRun();
+   278→   278→      }, 750));
+   279→   279→    } else {
+   280→   280→      /* -------- normal move: spawn H into random empty cells -------- */
+   281→   281→      const rate = novaCountRef.current > 0 ? NOVA_SPAWN : BASE_SPAWN;
+   282→   282→      const sp = spawnRandom(res.board, rate, nextId);
+   283→   283→      spawnedHRef.current += sp.spawned.length;
+   284→   284→      boardRef.current = sp.board;
+   285→   285→      setBoard(sp.board);
+   286→   286→      setMergedFlags(res.merged);
+   287→   287→      setGhosts(newGhosts);
+   288→   288→      setSpawnedIds(sp.spawned.map((s) => s.id));
+   289→   289→      setSpawnedH(spawnedHRef.current);
+   290→   290→      addTimer(window.setTimeout(() => {
+   291→   291→        setGhosts((prev) => prev.filter((g) => !ghostKeys.includes(g.key)));
+   292→   292→      }, 190));
+   293→   293→      if (!hasMoves(sp.board)) endRun();
+   294→   294→    }
+   295→   295→
+   296→   296→    // epoch glow / fanfare
+   297→   297→    const ep = epochForScore(scoreRef.current);
+   298→   298→    if (ep.id !== epochRef.current) {
+   299→   299→      epochRef.current = ep.id;
+   300→   300→      sfx.levelup();
+   301→   301→    }
+   302→   302→  };
+   303→   303→
+   304→   304→  /* ---- keyboard (arrow keys), swipe handled via pointer events ---- */
+   305→   305→  useEffect(() => {
+   306→   306→    const onKey = (e: KeyboardEvent) => {
+   307→   307→      if (codexOpenRef.current || gameOverRef.current) return;
+   308→   308→      const target = e.target as HTMLElement | null;
+   309→   309→      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+   310→   310→      const map: Record<string, Dir> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+   311→   311→      const dir = map[e.key];
+   312→   312→      if (!dir) return;
+   313→   313→      e.preventDefault();
+   314→   314→      doMove(dir);
+   315→   315→    };
+   316→   316→    window.addEventListener('keydown', onKey);
+   317→   317→    return () => window.removeEventListener('keydown', onKey);
+   318→   318→  });
+   319→   319→
+   320→   320→  /* ---- timer cleanup on unmount ---- */
+   321→   321→  useEffect(() => () => {
+   322→   322→    for (const id of timersRef.current) window.clearTimeout(id);
+   323→   323→  }, []);
+   324→   324→
+   325→   325→  /* ---- swipe on the grid (pointer events, 24px threshold) ---- */
+   326→   326→  const onPointerDown = (e: ReactPointerEvent) => {
+   327→   327→    pointerRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+   328→   328→  };
+   329→   329→  const onPointerUp = (e: ReactPointerEvent) => {
+   330→   330→    const p = pointerRef.current;
+   331→   331→    pointerRef.current = null;
+   332→   332→    if (!p || p.id !== e.pointerId) return;
+   333→   333→    const dx = e.clientX - p.x;
+   334→   334→    const dy = e.clientY - p.y;
+   335→   335→    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+   336→   336→    doMove(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+   337→   337→  };
+   338→   338→
+   339→   339→  /* ---- derived ---- */
+   340→   340→  const epoch = epochForScore(score);
+   341→   341→  const spawnRate = supernovas > 0 ? NOVA_SPAWN : BASE_SPAWN;
+   342→   342→  const chips = ELEMENTS.map((el) => ({ el, count: el.level === 1 ? spawnedH : forged[el.level] }));
+   343→   343→  const ghostSet = new Set(ghosts.map((g) => g.key));
+   344→   344→
+   345→   345→  const openCodex = () => {
+   346→   346→    codexOpenRef.current = true;
+   347→   347→    setCodexOpen(true);
+   348→   348→    sfx.click();
+   349→   349→  };
+   350→   350→
+   351→   351→  return (
+   352→   352→    <div dir={rtl ? 'rtl' : 'ltr'} className="mx-auto w-full max-w-[520px] px-2 pb-6 pt-2">
+   353→   353→      <style>{SF_CSS}</style>
+   354→   354→
+   355→   355→      {/* ---------- forge chamber ---------- */}
+   356→   356→      <div className="sf-shell relative overflow-hidden rounded-3xl border border-amber-500/25 shadow-2xl shadow-black/50">
+   357→   357→        <div className="sf-shimmer-a" aria-hidden />
+   358→   358→        <div className="sf-shimmer-b" aria-hidden />
+   359→   359→        <div className="sf-vignette" aria-hidden />
+   360→   360→
+   361→   361→        <div className="relative z-10 p-3 sm:p-4">
+   362→   362→          {/* ---------- HUD ---------- */}
+   363→   363→          <div className="flex items-start justify-between gap-2">
+   364→   364→            <div className="min-w-0">
+   365→   365→              <h2 className="flex items-center gap-1.5 text-base font-black text-amber-100 sm:text-lg">
+   366→   366→                <Star className="h-4 w-4 shrink-0 text-amber-400" fill="currentColor" />
+   367→   367→                {t('game_stellar')}
+   368→   368→              </h2>
+   369→   369→              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+   370→   370→                <span
+   371→   371→                  key={epoch.id}
+   372→   372→                  className="animate-pop inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-bold"
+   373→   373→                  style={{ color: epoch.color, borderColor: `${epoch.color}55`, background: `${epoch.color}14`, boxShadow: `0 0 12px ${epoch.color}44` }}
+   374→   374→                >
+   375→   375→                  <Sparkles className="h-3 w-3" />
+   376→   376→                  {t('stellar_epoch')}: {epoch[lang]}
+   377→   377→                </span>
+   378→   378→                <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-200" title={t('stellar_star')}>
+   379→   379→                  <Star className="h-3 w-3" fill="currentColor" />
+   380→   380→                  {t('stellar_star')} {localizeDigits(star, locale)}
+   381→   381→                </span>
+   382→   382→                <span
+   383→   383→                  className="inline-flex items-center gap-1 rounded-full border border-orange-500/25 bg-orange-500/10 px-2 py-0.5 text-[11px] font-bold text-orange-300"
+   384→   384→                  title={SF_TEXT.spawnRate[lang]}
+   385→   385→                >
+   386→   386→                  <Zap className="h-3 w-3" />
+   387→   387→                  ×{localizeDigits(spawnRate, locale)}
+   388→   388→                </span>
+   389→   389→              </div>
+   390→   390→            </div>
+   391→   391→            <div className="shrink-0 text-end">
+   392→   392→              <div className="text-[10px] uppercase tracking-wide text-amber-200/60">{t('stellar_mass')}</div>
+   393→   393→              <div className="gold-text text-2xl font-black leading-none sm:text-3xl">{localizeDigits(score, locale)}</div>
+   394→   394→            </div>
+   395→   395→          </div>
+   396→   396→
+   397→   397→          {/* ---------- controls ---------- */}
+   398→   398→          <div className="mt-2 flex items-center gap-1">
+   399→   399→            <Button
+   400→   400→              variant="ghost" size="icon" className="h-10 w-10 text-amber-200 hover:bg-white/10 hover:text-amber-100"
+   401→   401→              aria-label={t('arcade_again')} title={t('arcade_again')}
+   402→   402→              onClick={() => { sfx.click(); reset(); }}
+   403→   403→            >
+   404→   404→              <RotateCcw className="h-4.5 w-4.5" />
+   405→   405→            </Button>
+   406→   406→            <Button
+   407→   407→              variant="ghost" size="icon" className="h-10 w-10 text-amber-200 hover:bg-white/10 hover:text-amber-100"
+   408→   408→              aria-label={t('codex')} title={t('codex')}
+   409→   409→              onClick={openCodex}
+   410→   410→            >
+   411→   411→              <BookOpen className="h-4.5 w-4.5" />
+   412→   412→            </Button>
+   413→   413→            <Button
+   414→   414→              variant="ghost" size="icon" className="h-10 w-10 text-amber-200 hover:bg-white/10 hover:text-amber-100"
+   415→   415→              aria-label={t('back_park')} title={t('back_park')}
+   416→   416→              onClick={onExit}
+   417→   417→            >
+   418→   418→              <X className="h-5 w-5" />
+   419→   419→            </Button>
+   420→   420→            <span className="ms-auto hidden text-[10px] text-muted-foreground sm:block" dir="ltr">← ↑ ↓ → / swipe</span>
+   421→   421→          </div>
+   422→   422→
+   423→   423→          {/* ---------- grid ---------- */}
+   424→   424→          <div
+   425→   425→            className="sf-grid relative mt-2 aspect-[5/6] w-full touch-none select-none rounded-2xl border border-white/10 bg-black/35 p-0"
+   426→   426→            dir="ltr"
+   427→   427→            role="application"
+   428→   428→            aria-label={`${t('game_stellar')} — ${t('game_stellar_desc')}`}
+   429→   429→            onPointerDown={onPointerDown}
+   430→   430→            onPointerUp={onPointerUp}
+   431→   431→            onPointerCancel={() => { pointerRef.current = null; }}
+   432→   432→          >
+   433→   433→            {/* cell backdrops */}
+   434→   434→            {Array.from({ length: CELLS }, (_, i) => (
+   435→   435→              <div key={`c${i}`} className="sf-cell" aria-hidden />
+   436→   436→            ))}
+   437→   437→
+   438→   438→            {/* absorbed-tile ghosts (fade under the fresh merge) */}
+   439→   439→            {ghosts.map((g) => (
+   440→   440→              <div
+   441→   441→                key={g.key}
+   442→   442→                className="sf-tile sf-ghost"
+   443→   443→                style={{ '--c': g.index % COLS, '--r': Math.floor(g.index / COLS) } as CSSProperties}
+   444→   444→                aria-hidden
+   445→   445→              >
+   446→   446→                <div className="sf-pop">
+   447→   447→                  <TileFace tile={{ id: g.key, level: g.level }} locale={locale} />
+   448→   448→                </div>
+   449→   449→              </div>
+   450→   450→            ))}
+   451→   451→
+   452→   452→            {/* living tiles */}
+   453→   453→            {board.map((tile, i) => {
+   454→   454→              if (!tile) return null;
+   455→   455→              const isNew = spawnedIds.includes(tile.id);
+   456→   456→              const isMerged = mergedFlags[i] && !isNew && !ghostSet.has(tile.id);
+   457→   457→              return (
+   458→   458→                <div
+   459→   459→                  key={tile.id}
+   460→   460→                  className={`sf-tile ${tile.level === 7 ? 'sf-fe' : ''}`}
+   461→   461→                  style={{ '--c': i % COLS, '--r': Math.floor(i / COLS) } as CSSProperties}
+   462→   462→                >
+   463→   463→                  <div className={`sf-pop ${isMerged ? 'sf-merged' : ''} ${isNew ? 'sf-spawned' : ''}`}>
+   464→   464→                    <TileFace tile={tile} locale={locale} />
+   465→   465→                    {isMerged && <span className="sf-ring" aria-hidden />}
+   466→   466→                  </div>
+   467→   467→                </div>
+   468→   468→              );
+   469→   469→            })}
+   470→   470→
+   471→   471→            {/* ---------- end-of-run summary (behind the rewards modal) ---------- */}
+   472→   472→            {gameOver && (
+   473→   473→              <div className="absolute inset-0 z-30 grid place-items-center rounded-2xl bg-black/80 p-3 backdrop-blur-sm">
+   474→   474→                <div className="animate-pop w-full max-w-[300px] space-y-2.5 text-center">
+   475→   475→                  <div className="text-[10px] uppercase tracking-widest text-amber-200/60">{t('stellar_epoch')}</div>
+   476→   476→                  <div className="text-2xl font-black" style={{ color: epoch.color, textShadow: `0 0 18px ${epoch.color}88` }}>
+   477→   477→                    {epoch[lang]}
+   478→   478→                  </div>
+   479→   479→                  <div>
+   480→   480→                    <div className="text-[10px] uppercase tracking-wide text-amber-200/60">{t('stellar_mass')}</div>
+   481→   481→                    <div className="gold-text text-3xl font-black leading-tight">{localizeDigits(score, locale)}</div>
+   482→   482→                  </div>
+   483→   483→                  <div className="flex flex-wrap items-center justify-center gap-1">
+   484→   484→                    {chips.map(({ el, count }) => (
+   485→   485→                      <span
+   486→   486→                        key={el.symbol}
+   487→   487→                        dir="ltr"
+   488→   488→                        className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-bold ${count > 0 ? '' : 'opacity-35'}`}
+   489→   489→                        style={{ color: el.mid, borderColor: `${el.deep}66`, background: `${el.mid}12` }}
+   490→   490→                      >
+   491→   491→                        {el.symbol}×{localizeDigits(count, locale)}
+   492→   492→                      </span>
+   493→   493→                    ))}
+   494→   494→                  </div>
+   495→   495→                  <div className="flex items-center justify-center gap-2 text-[11px] text-muted-foreground">
+   496→   496→                    <span>💥 ×{localizeDigits(supernovas, locale)}</span>
+   497→   497→                    <span>⭐ {t('stellar_star')} {localizeDigits(star, locale)}</span>
+   498→   498→                  </div>
+   499→   499→                  <div className="flex gap-2 pt-1">
+   500→   500→                    <Button className="glow-gold flex-1" onClick={() => { sfx.click(); reset(); }}>{t('arcade_again')}</Button>
+   501→   501→                    <Button variant="outline" className="flex-1" onClick={() => { sfx.click(); onExit(); }}>{t('back_park')}</Button>
+   502→   502→                  </div>
+   503→   503→                </div>
+   504→   504→              </div>
+   505→   505→            )}
+   506→   506→          </div>
+   507→   507→
+   508→   508→          {/* ---------- d-pad (plus shape, physical directions) ---------- */}
+   509→   509→          <div className="mx-auto mt-3 grid w-fit grid-cols-3 gap-2" dir="ltr" role="group" aria-label={SF_TEXT.hint[lang]}>
+   510→   510→            <div />
+   511→   511→            <DPad dir="up" lang={lang} onPress={doMove} />
+   512→   512→            <div />
+   513→   513→            <DPad dir="left" lang={lang} onPress={doMove} />
+   514→   514→            <div className="grid h-14 w-14 place-items-center rounded-2xl border border-amber-500/20 bg-amber-500/5" aria-hidden>
+   515→   515→              <Sparkles className="h-5 w-5 text-amber-400/70" />
+   516→   516→            </div>
+   517→   517→            <DPad dir="right" lang={lang} onPress={doMove} />
+   518→   518→            <div />
+   519→   519→            <DPad dir="down" lang={lang} onPress={doMove} />
+   520→   520→            <div />
+   521→   521→          </div>
+   522→   522→
+   523→   523→          <p className="mt-2 text-center text-[10px] text-muted-foreground sm:hidden">{SF_TEXT.hint[lang]}</p>
+   524→   524→        </div>
+   525→   525→      </div>
+   526→   526→
+   527→   527→      {/* ---------- supernova overlay ---------- */}
+   528→   528→      {nova && (
+   529→   529→        <div className="sf-nova" key={novaKey} aria-hidden>
+   530→   530→          <div className="sf-nova-flash" />
+   531→   531→          <div className="sf-nova-ring" />
+   532→   532→          <div className="sf-nova-ring sf-nova-ring2" />
+   533→   533→          <div className="sf-nova-text" dir={rtl ? 'rtl' : 'ltr'}>
+   534→   534→            <b>💥 {t('stellar_supernova')}</b>
+   535→   535→            <small>{t('stellar_supernova_desc')}</small>
+   536→   536→          </div>
+   537→   537→        </div>
+   538→   538→      )}
+   539→   539→
+   540→   540→      {/* ---------- science codex ---------- */}
+   541→   541→      <Dialog
+   542→   542→        open={codexOpen}
+   543→   543→        onOpenChange={(o) => {
+   544→   544→          codexOpenRef.current = o;
+   545→   545→          setCodexOpen(o);
+   546→   546→        }}
+   547→   547→      >
+   548→   548→        <DialogContent className="royal-card max-h-[85vh] overflow-hidden sm:max-w-md" aria-describedby={undefined} dir={rtl ? 'rtl' : 'ltr'}>
+   549→   549→          <DialogHeader>
+   550→   550→            <DialogTitle className="gold-text flex items-center gap-2 text-base">
+   551→   551→              <BookOpen className="h-4 w-4 text-amber-400" />
+   552→   552→              {t('codex')} · {t('game_stellar')}
+   553→   553→            </DialogTitle>
+   554→   554→          </DialogHeader>
+   555→   555→          <div className="nice-scroll -mx-1 max-h-[62vh] space-y-3 overflow-y-auto px-1 pe-1">
+   556→   556→            <p className="text-xs leading-relaxed text-muted-foreground">{SF_TEXT.intro[lang]}</p>
+   557→   557→
+   558→   558→            <h4 className="flex items-center gap-1.5 pt-1 text-xs font-black text-amber-200">
+   559→   559→              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+   560→   560→              {SF_TEXT.elementsHdr[lang]}
+   561→   561→            </h4>
+   562→   562→            <div className="space-y-2">
+   563→   563→              {ELEMENTS.map((el) => (
+   564→   564→                <div key={el.symbol} className="flex items-start gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-2.5">
+   565→   565→                  <div
+   566→   566→                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-sm font-black"
+   567→   567→                    dir="ltr"
+   568→   568→                    style={{
+   569→   569→                      background: `radial-gradient(circle at 32% 26%, ${el.light} 0%, ${el.mid} 52%, ${el.deep} 100%)`,
+   570→   570→                      color: el.ink,
+   571→   571→                      boxShadow: `inset 0 1px 0 rgba(255,255,255,.5), 0 0 10px ${el.glow}`,
+   572→   572→                    }}
+   573→   573→                  >
+   574→   574→                    {el.symbol}
+   575→   575→                  </div>
+   576→   576→                  <div className="min-w-0">
+   577→   577→                    <div className="flex items-baseline gap-1.5">
+   578→   578→                      <b className="text-sm" style={{ color: el.mid }}>{el[lang]}</b>
+   579→   579→                      <span className="text-[10px] text-muted-foreground" dir="ltr">{localizeDigits(el.level, locale)} · {el.symbol}</span>
+   580→   580→                    </div>
+   581→   581→                    <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{lang === 'fa' ? el.blurbFa : el.blurbEn}</p>
+   582→   582→                  </div>
+   583→   583→                </div>
+   584→   584→              ))}
+   585→   585→            </div>
+   586→   586→
+   587→   587→            <h4 className="flex items-center gap-1.5 pt-1 text-xs font-black text-amber-200">
+   588→   588→              <Flame className="h-3.5 w-3.5 text-orange-400" />
+   589→   589→              {SF_TEXT.stagesHdr[lang]}
+   590→   590→            </h4>
+   591→   591→            <div className="space-y-2">
+   592→   592→              {STAGES.map((st, i) => {
+   593→   593→                const ep = EPOCHS.find((e) => e.id === st.epoch)!;
+   594→   594→                return (
+   595→   595→                  <div key={st.id} className="rounded-xl border border-white/10 bg-white/[0.03] p-2.5">
+   596→   596→                    <div className="flex items-center gap-2">
+   597→   597→                      <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md bg-amber-500/15 text-[10px] font-black text-amber-300">
+   598→   598→                        {localizeDigits(i + 1, locale)}
+   599→   599→                      </span>
+   600→   600→                      <b className="text-sm" style={{ color: ep.color }}>{lang === 'fa' ? st.fa : st.en}</b>
+   601→   601→                      <span
+   602→   602→                        className="ms-auto shrink-0 rounded-full border px-1.5 py-0.5 text-[9px] font-bold"
+   603→   603→                        style={{ color: ep.color, borderColor: `${ep.color}44`, background: `${ep.color}10` }}
+   604→   604→                      >
+   605→   605→                        {ep[lang]}
+   606→   606→                      </span>
+   607→   607→                    </div>
+   608→   608→                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{lang === 'fa' ? st.blurbFa : st.blurbEn}</p>
+   609→   609→                  </div>
+   610→   610→                );
+   611→   611→              })}
+   612→   612→            </div>
+   613→   613→
+   614→   614→            <div dir="ltr" className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-2 text-center text-[10px] italic text-muted-foreground">
+   615→   615→              {CODEX_CREDIT}
+   616→   616→            </div>
+   617→   617→          </div>
+   618→   618→        </DialogContent>
+   619→   619→      </Dialog>
+   620→   620→
+   621→   621→      {/* ---------- shared rewards modal ---------- */}
+   622→   622→      <ArcadeResultModal
+   623→   623→        open={resultOpen}
+   624→   624→        title={t('arcade_done')}
+   625→   625→        subtitle={`${epoch[lang]} · 💥 ×${localizeDigits(supernovas, locale)}`}
+   626→   626→        score={lastScore}
+   627→   627→        rewards={rewards}
+   628→   628→        emoji="🌟"
+   629→   629→        onAgain={() => { reset(); }}
+   630→   630→        onExit={onExit}
+   631→   631→      />
+   632→   632→    </div>
+   633→   633→  );
+   634→   634→}
+   635→   635→
+   636→   636→/* ------------------------------ d-pad btn ----------------------------- */
+   637→   637→
+   638→   638→function DPad({ dir, lang, onPress }: { dir: Dir; lang: 'fa' | 'en'; onPress: (d: Dir) => void }) {
+   639→   639→  const Icon = DPAD_ICONS[dir];
+   640→   640→  return (
+   641→   641→    <button
+   642→   642→      type="button"
+   643→   643→      aria-label={SF_TEXT.dirLabels[dir][lang]}
+   644→   644→      onClick={() => onPress(dir)}
+   645→   645→      className="pressable grid h-14 w-14 place-items-center rounded-2xl border border-amber-500/25 bg-white/5 text-amber-200 shadow-lg shadow-black/40 transition-colors hover:bg-white/10 hover:text-amber-100 active:bg-amber-500/20"
+   646→   646→    >
+   647→   647→      <Icon className="h-7 w-7" />
+   648→   648→    </button>
+   649→   649→  );
+   650→   650→}
+   651→   651→

@@ -1,0 +1,962 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * Boulder Yard shared game core (T9-e) — one polished campaign shell reused
+     5→ * by BoulderYardGame (classic) and BoulderYardGame2 (pits & gates).
+     6→ * Engine: src/lib/game/boulder-engine.ts. Economy: shared /api/arcade.
+     7→ *
+     8→ * B1 — driver & machine progression: retro boot → menu → garage (buy/select/
+     9→ * upgrade 8 CSS-art machines) → levels with per-level dig/lift charges,
+    10→ * chain-push power, HUD pills, ability buttons (touch ≥56px) and keyboard
+    11→ * ⇧D/G/H. Garage wallet + driver level are SHARED across both games
+    12→ * (localStorage doi_boulder_garage_v1). Level layouts are untouched.
+    13→ */
+    14→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+    15→import { motion, AnimatePresence, useAnimationControls } from 'framer-motion';
+    16→import { toast } from 'sonner';
+    17→import { useApp } from '@/store/app';
+    18→import { localizeDigits } from '@/lib/i18n';
+    19→import { sfx } from '@/lib/sound';
+    20→import { Button } from '@/components/ui/button';
+    21→import { ArcadeResultModal, announceArcadeRewards, submitArcade, type ArcadeSubmitResult } from '@/lib/arcade-client';
+    22→import { useGameSession } from '@/lib/immersive';
+    23→import { RetroBoot } from '@/components/shared/RetroBoot';
+    24→import {
+    25→  BoulderLevelDef, BoulderGameState, createGame, step, undo as engineUndo, starsFor,
+    26→  loadProgress, saveProgress, type Dir, type BoulderProgress, type AbilityKind,
+    27→} from '@/lib/game/boulder-engine';
+    28→import {
+    29→  MACHINES, STAT_KEYS, GarageState, MachineDef, StatKey, loadGarage, saveGarage, freshGarage, getMachine,
+    30→  effectiveStats, effectiveStat, upgradeTier, upgradeCost, statCap,
+    31→  buyMachine, selectMachine, buyUpgrade, canBuy, completionReward, applyReward, levelProgress,
+    32→} from '@/lib/game/boulder-garage';
+    33→
+    34→export interface HelpRow { icon: string; key: string }
+    35→
+    36→export interface BoulderGameCoreProps {
+    37→  arcadeId: 'boulderyard' | 'boulderyard2';
+    38→  storageKey: string;
+    39→  levels: BoulderLevelDef[];
+    40→  yardSize: number;
+    41→  onExit: () => void;
+    42→  helpRows: HelpRow[];
+    43→  /* retro boot card (B1) */
+    44→  bootTitle: string;
+    45→  bootSubtitle: string;
+    46→  bootAccent: string;
+    47→  bootIcon: string;
+    48→}
+    49→
+    50→type Phase = 'intro' | 'select' | 'play' | 'garage';
+    51→
+    52→/** per-level machine charges — UI state, reset on every level start/restart */
+    53→interface Charges { dig: number; lift: number; cargo: boolean }
+    54→
+    55→const BOULDER_BG = 'radial-gradient(circle at 32% 28%, #d6d3d1 0%, #a8a29e 45%, #57534e 100%)';
+    56→
+    57→/* ---------- tile art (pure CSS, no assets) ---------- */
+    58→function Tile({ kind, gates }: { kind: string; gates?: string }) {
+    59→  if (kind === 'wall') {
+    60→    return <div className="h-full w-full rounded-[4px] border border-stone-700/60 bg-gradient-to-br from-stone-600 to-stone-800 shadow-inner" />;
+    61→  }
+    62→  if (kind === 'void') return <div className="h-full w-full" />;
+    63→  if (kind === 'target') {
+    64→    return (
+    65→      <div className="relative h-full w-full">
+    66→        <div className="absolute inset-[12%] animate-pulse rounded-full border-2 border-dashed border-emerald-400/70" />
+    67→        <div className="absolute inset-[34%] rounded-full bg-emerald-400/25" />
+    68→      </div>
+    69→    );
+    70→  }
+    71→  if (kind === 'pit') {
+    72→    return (
+    73→      <div className="relative h-full w-full">
+    74→        <div className="absolute inset-[8%] rounded-full border border-violet-300/30 bg-gradient-to-b from-stone-950 to-violet-950 shadow-[inset_0_6px_14px_rgba(0,0,0,0.9)]" />
+    75→        <div className="absolute inset-[30%] rounded-full bg-black/80 blur-[1px]" />
+    76→      </div>
+    77→    );
+    78→  }
+    79→  if (gates) {
+    80→    const rot = gates === 'U' ? 0 : gates === 'R' ? 90 : gates === 'D' ? 180 : 270;
+    81→    return (
+    82→      <div className="relative h-full w-full">
+    83→        <div className="absolute inset-[10%] rounded-md border border-sky-400/50 bg-sky-500/10" />
+    84→        <div className="absolute inset-0 grid place-items-center" style={{ transform: `rotate(${rot}deg)` }}>
+    85→          <span className="text-sm font-black text-sky-300 drop-shadow">➤</span>
+    86→        </div>
+    87→      </div>
+    88→    );
+    89→  }
+    90→  return <div className="h-full w-full rounded-[4px] bg-gradient-to-br from-amber-100/90 to-amber-200/70 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]" />;
+    91→}
+    92→
+    93→function Boulder() {
+    94→  return (
+    95→    <div
+    96→      className="h-full w-full rounded-full border border-stone-500/70 shadow-[0_3px_6px_rgba(0,0,0,0.45),inset_-3px_-4px_8px_rgba(0,0,0,0.35),inset_3px_4px_6px_rgba(255,255,255,0.35)]"
+    97→      style={{ background: BOULDER_BG }}
+    98→      aria-hidden
+    99→    />
+   100→  );
+   101→}
+   102→
+   103→/* ================= machine CSS-art (B1) ================= */
+   104→function paint(hue: number) {
+   105→  return {
+   106→    body: `hsl(${hue} 62% 50%)`,
+   107→    dark: `hsl(${hue} 58% 34%)`,
+   108→    light: `hsl(${hue} 70% 60%)`,
+   109→    glass: `hsl(${hue} 45% 84%)`,
+   110→  };
+   111→}
+   112→
+   113→function Wheel({ style }: { style: React.CSSProperties }) {
+   114→  return (
+   115→    <div className="absolute rounded-full" style={{ background: 'radial-gradient(circle at 35% 30%, #78716c, #44403c 55%, #1c1917)', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.15)', ...style }}>
+   116→      <div className="absolute rounded-full bg-stone-400/80" style={{ inset: '34%' }} />
+   117→    </div>
+   118→  );
+   119→}
+   120→
+   121→/** Side-view machine sprite for garage cards / HUD badges (facing right). */
+   122→export function MachineSprite({ def, className }: { def: MachineDef; className?: string }) {
+   123→  const p = paint(def.hue);
+   124→  const inner = (() => {
+   125→    switch (def.kind) {
+   126→      case 'tractor':
+   127→        return (
+   128→          <>
+   129→            <Wheel style={{ left: '6%', bottom: '0%', width: '38%', aspectRatio: '1' }} />
+   130→            <Wheel style={{ right: '10%', bottom: '6%', width: '24%', aspectRatio: '1' }} />
+   131→            <div className="absolute rounded-[18%]" style={{ left: '18%', right: '6%', bottom: '26%', height: '24%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   132→            <div className="absolute rounded-t-[24%]" style={{ left: '24%', bottom: '48%', width: '26%', height: '32%', background: p.light, boxShadow: 'inset 0 0 0 2px rgba(0,0,0,0.22)' }} />
+   133→            <div className="absolute rounded-sm" style={{ left: '33%', bottom: '54%', width: '12%', height: '22%', background: p.glass }} />
+   134→            <div className="absolute rounded-full" style={{ left: '16%', bottom: '62%', width: '7%', height: '30%', background: '#57534e' }} />
+   135→          </>
+   136→        );
+   137→      case 'tractor_flat':
+   138→        return (
+   139→          <>
+   140→            <div className="absolute rounded-md" style={{ left: '2%', bottom: '24%', width: '54%', height: '11%', background: '#a8a29e', boxShadow: 'inset 0 -2px 0 rgba(0,0,0,0.3)' }} />
+   141→            <Wheel style={{ left: '8%', bottom: '2%', width: '20%', aspectRatio: '1' }} />
+   142→            <Wheel style={{ left: '34%', bottom: '2%', width: '20%', aspectRatio: '1' }} />
+   143→            <Wheel style={{ right: '6%', bottom: '2%', width: '24%', aspectRatio: '1' }} />
+   144→            <div className="absolute rounded-[20%]" style={{ right: '4%', bottom: '20%', width: '36%', height: '46%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   145→            <div className="absolute rounded-sm" style={{ right: '12%', bottom: '46%', width: '20%', height: '30%', background: p.glass, boxShadow: 'inset 0 0 0 2px rgba(0,0,0,0.25)' }} />
+   146→            <div className="absolute rounded-full" style={{ right: '32%', bottom: '52%', width: '6%', height: '34%', background: '#57534e' }} />
+   147→          </>
+   148→        );
+   149→      case 'dozer':
+   150→        return (
+   151→          <>
+   152→            <div className="absolute rounded-full" style={{ left: '4%', right: '16%', bottom: '0%', height: '30%', background: '#292524', boxShadow: 'inset 0 0 0 2px #57534e' }}>
+   153→              <div className="absolute rounded-full bg-stone-600" style={{ left: '12%', top: '18%', bottom: '18%', width: '14%' }} />
+   154→              <div className="absolute rounded-full bg-stone-600" style={{ left: '42%', top: '18%', bottom: '18%', width: '14%' }} />
+   155→              <div className="absolute rounded-full bg-stone-600" style={{ right: '12%', top: '18%', bottom: '18%', width: '14%' }} />
+   156→            </div>
+   157→            <div className="absolute rounded-[16%]" style={{ left: '12%', right: '26%', bottom: '30%', height: '26%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   158→            <div className="absolute rounded-t-[24%]" style={{ left: '18%', bottom: '56%', width: '28%', height: '32%', background: p.light, boxShadow: 'inset 0 0 0 2px rgba(0,0,0,0.22)' }} />
+   159→            <div className="absolute rounded-sm" style={{ left: '27%', bottom: '63%', width: '13%', height: '20%', background: p.glass }} />
+   160→            <div className="absolute rounded-[14%]" style={{ right: '0%', bottom: '0%', width: '14%', height: '68%', background: 'linear-gradient(180deg,#e2e8f0,#94a3b8 60%,#64748b)', boxShadow: 'inset -2px 0 0 rgba(0,0,0,0.25)' }} />
+   161→            <div className="absolute" style={{ right: '13%', bottom: '40%', width: '15%', height: '8%', background: p.dark }} />
+   162→            <div className="absolute" style={{ right: '13%', bottom: '22%', width: '15%', height: '8%', background: p.dark }} />
+   163→          </>
+   164→        );
+   165→      case 'excavator':
+   166→        return (
+   167→          <>
+   168→            <div className="absolute rounded-full" style={{ left: '6%', width: '54%', bottom: '0%', height: '26%', background: '#292524', boxShadow: 'inset 0 0 0 2px #57534e' }}>
+   169→              <div className="absolute rounded-full bg-stone-600" style={{ left: '12%', top: '20%', bottom: '20%', width: '16%' }} />
+   170→              <div className="absolute rounded-full bg-stone-600" style={{ right: '12%', top: '20%', bottom: '20%', width: '16%' }} />
+   171→            </div>
+   172→            <div className="absolute rounded-[16%]" style={{ left: '8%', bottom: '26%', width: '46%', height: '32%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   173→            <div className="absolute rounded-sm" style={{ left: '34%', bottom: '32%', width: '16%', height: '20%', background: p.glass }} />
+   174→            <div className="absolute" style={{ left: '40%', bottom: '52%', width: '34%', height: '9%', background: p.dark, transform: 'rotate(-26deg)', transformOrigin: 'left center' }} />
+   175→            <div className="absolute" style={{ left: '68%', bottom: '62%', width: '26%', height: '8%', background: p.body, transform: 'rotate(34deg)', transformOrigin: 'left center' }} />
+   176→            <div className="absolute rounded-[20%]" style={{ right: '0%', bottom: '34%', width: '15%', height: '22%', background: 'linear-gradient(180deg,#94a3b8,#475569)', boxShadow: 'inset -2px -2px 0 rgba(0,0,0,0.3)' }} />
+   177→          </>
+   178→        );
+   179→      case 'forklift':
+   180→        return (
+   181→          <>
+   182→            <div className="absolute rounded-[18%]" style={{ left: '4%', bottom: '18%', width: '56%', height: '40%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   183→            <div className="absolute" style={{ left: '12%', bottom: '58%', width: '6%', height: '30%', background: p.dark }} />
+   184→            <div className="absolute" style={{ left: '42%', bottom: '58%', width: '6%', height: '30%', background: p.dark }} />
+   185→            <div className="absolute rounded-sm" style={{ left: '10%', bottom: '86%', width: '40%', height: '7%', background: p.dark }} />
+   186→            <div className="absolute rounded-sm" style={{ left: '20%', bottom: '34%', width: '24%', height: '18%', background: p.glass }} />
+   187→            <div className="absolute" style={{ right: '26%', bottom: '6%', width: '6%', height: '78%', background: '#78716c' }} />
+   188→            <div className="absolute" style={{ right: '18%', bottom: '6%', width: '6%', height: '78%', background: '#78716c' }} />
+   189→            <div className="absolute" style={{ right: '0%', bottom: '12%', width: '20%', height: '6%', background: '#d6d3d1' }} />
+   190→            <div className="absolute" style={{ right: '0%', bottom: '24%', width: '20%', height: '6%', background: '#d6d3d1' }} />
+   191→            <Wheel style={{ left: '8%', bottom: '0%', width: '22%', aspectRatio: '1' }} />
+   192→            <Wheel style={{ left: '38%', bottom: '0%', width: '22%', aspectRatio: '1' }} />
+   193→          </>
+   194→        );
+   195→      case 'loader':
+   196→      default:
+   197→        return (
+   198→          <>
+   199→            <Wheel style={{ left: '8%', bottom: '0%', width: '30%', aspectRatio: '1' }} />
+   200→            <Wheel style={{ right: '24%', bottom: '0%', width: '30%', aspectRatio: '1' }} />
+   201→            <div className="absolute rounded-[16%]" style={{ left: '10%', right: '26%', bottom: '26%', height: '34%', background: p.body, boxShadow: 'inset 0 -3px 0 rgba(0,0,0,0.3)' }} />
+   202→            <div className="absolute rounded-sm" style={{ left: '18%', bottom: '38%', width: '22%', height: '16%', background: p.glass }} />
+   203→            <div className="absolute" style={{ right: '14%', bottom: '52%', width: '16%', height: '7%', background: p.dark }} />
+   204→            <div className="absolute" style={{ right: '14%', bottom: '36%', width: '16%', height: '7%', background: p.dark }} />
+   205→            <div className="absolute" style={{ right: '0%', bottom: '0%', width: '28%', height: '48%', background: 'linear-gradient(180deg,#e2e8f0,#94a3b8 55%,#64748b)', borderRadius: '10% 10% 42% 42%', boxShadow: 'inset -2px -2px 0 rgba(0,0,0,0.25)' }} />
+   206→          </>
+   207→        );
+   208→    }
+   209→  })();
+   210→  return (
+   211→    <div className={className} dir="ltr" aria-hidden>
+   212→      <div className="relative h-full w-full" style={{ transform: `scale(${def.size})` }}>
+   213→        {inner}
+   214→        <div className="absolute bottom-[-4%] left-[10%] right-[6%] h-[6%] rounded-full bg-black/25 blur-[2px]" />
+   215→      </div>
+   216→    </div>
+   217→  );
+   218→}
+   219→
+   220→/** Top-down in-game vehicle token: rotates with facing, shows cargo. */
+   221→function MachineToken({ def, facing, carrying, perf }: { def: MachineDef; facing: Dir; carrying: boolean; perf: boolean }) {
+   222→  const p = paint(def.hue);
+   223→  const rot = facing === 'U' ? -90 : facing === 'D' ? 90 : facing === 'L' ? 180 : 0;
+   224→  return (
+   225→    <div className="relative h-full w-full" aria-hidden>
+   226→      <div className={`absolute inset-0 ${perf ? '' : 'transition-transform duration-150'}`} style={{ transform: `rotate(${rot}deg)` }}>
+   227→        <div className="absolute rounded-full" style={{ left: '10%', right: '10%', top: '2%', height: '15%', background: '#292524' }} />
+   228→        <div className="absolute rounded-full" style={{ left: '10%', right: '10%', bottom: '2%', height: '15%', background: '#292524' }} />
+   229→        <div
+   230→          className="absolute rounded-[30%]"
+   231→          style={{
+   232→            left: '12%', right: '12%', top: '13%', bottom: '13%',
+   233→            background: `linear-gradient(135deg, ${p.light} 0%, ${p.body} 55%, ${p.dark} 100%)`,
+   234→            boxShadow: '0 2px 5px rgba(0,0,0,0.45), inset 0 0 0 2px rgba(0,0,0,0.2)',
+   235→          }}
+   236→        />
+   237→        <div className="absolute rounded-[32%]" style={{ left: '36%', top: '26%', width: '30%', height: '48%', background: p.glass, boxShadow: 'inset 0 0 0 2px rgba(255,255,255,0.4)' }} />
+   238→        <div className="absolute rounded-sm" style={{ right: '3%', top: '41%', width: '10%', height: '18%', background: p.light }} />
+   239→      </div>
+   240→      {carrying && (
+   241→        <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
+   242→          <div className="h-3/4 w-3/4 min-h-[10px] min-w-[10px] rounded-full border-2 border-amber-300/90 shadow-[0_2px_5px_rgba(0,0,0,0.5)]" style={{ background: BOULDER_BG }} />
+   243→        </div>
+   244→      )}
+   245→    </div>
+   246→  );
+   247→}
+   248→
+   249→/* ================= garage screen ================= */
+   250→function GarageScreen({ garage, update, onBack }: {
+   251→  garage: GarageState;
+   252→  update: (g: GarageState) => void;
+   253→  onBack: () => void;
+   254→}) {
+   255→  const { t, locale } = useApp();
+   256→  const money = garage.money;
+   257→
+   258→  const doBuy = (m: MachineDef) => {
+   259→    const chk = canBuy(garage, m);
+   260→    if (!chk.ok) {
+   261→      sfx.bad();
+   262→      toast.error(chk.reason === 'money' ? `💵 ${t('g_cant_afford')}` : `🔒 ${t('g_need_level')} ${localizeDigits(m.requiredLevel, locale)}`);
+   263→      return;
+   264→    }
+   265→    const next = buyMachine(garage, m);
+   266→    if (!next) return;
+   267→    update(next);
+   268→    sfx.coin();
+   269→    toast.success(`🚜 ${t('g_bought_toast')} — ${t('g_m_' + m.id)}`);
+   270→  };
+   271→
+   272→  const doSelect = (m: MachineDef) => {
+   273→    update(selectMachine(garage, m.id));
+   274→    sfx.click();
+   275→    toast.success(`🔧 ${t('g_select_toast')} — ${t('g_m_' + m.id)}`);
+   276→  };
+   277→
+   278→  const doUpgrade = (m: MachineDef, stat: StatKey) => {
+   279→    const next = buyUpgrade(garage, m, stat);
+   280→    if (!next) { sfx.bad(); toast.error(`💵 ${t('g_cant_afford')}`); return; }
+   281→    update(next);
+   282→    sfx.coin();
+   283→    toast.success(`⬆️ ${t('g_upgrade_toast')} — ${t('g_m_' + m.id)}`);
+   284→  };
+   285→
+   286→  const statLabel: Record<StatKey, string> = { power: 'g_stat_power', dig: 'g_stat_dig', lift: 'g_stat_lift' };
+   287→  const statIcon: Record<StatKey, string> = { power: '💪', dig: '🪣', lift: '🏗️' };
+   288→
+   289→  return (
+   290→    <div className="royal-card mx-auto max-w-2xl rounded-3xl p-4 sm:p-5">
+   291→      {/* header: money + driver level */}
+   292→      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+   293→        <h3 className="text-lg font-black gold-text">🚜 {t('g_garage')}</h3>
+   294→        <div className="flex items-center gap-1.5">
+   295→          <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-bold text-amber-300">💵 {localizeDigits(money, locale)}</span>
+   296→          <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-xs font-bold text-emerald-300">🎖️ {t('g_driver_lvl')} {localizeDigits(garage.driverLevel, locale)}</span>
+   297→        </div>
+   298→      </div>
+   299→      <p className="mb-1 text-[11px] text-muted-foreground">{t('g_garage_sub')}</p>
+   300→      {/* driver XP bar */}
+   301→      <div className="mb-1 flex items-center gap-2">
+   302→        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+   303→          <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-emerald-300" style={{ width: `${Math.round(levelProgress(garage.driverXp) * 100)}%` }} />
+   304→        </div>
+   305→        <span className="text-[10px] font-bold text-emerald-300">✦ {localizeDigits(garage.driverXp, locale)}</span>
+   306→      </div>
+   307→      <p className="mb-3 text-[10px] text-muted-foreground/80">{t('g_stats_hint')}</p>
+   308→
+   309→      <div className="nice-scroll max-h-[58dvh] space-y-2.5 overflow-y-auto pe-1">
+   310→        {MACHINES.map((m) => {
+   311→          const owned = garage.ownedMachines.includes(m.id);
+   312→          const selected = garage.selected === m.id;
+   313→          const es = effectiveStats(m, garage);
+   314→          const levelLocked = garage.driverLevel < m.requiredLevel;
+   315→          return (
+   316→            <div
+   317→              key={m.id}
+   318→              className={`rounded-2xl border p-2.5 transition ${
+   319→                selected ? 'border-emerald-400/60 bg-emerald-500/[0.07] shadow-[0_0_0_1px_rgba(52,211,153,0.25)]' : owned ? 'border-amber-500/40 bg-amber-500/[0.04]' : 'border-border/70 bg-muted/20'
+   320→              }`}
+   321→            >
+   322→              <div className="flex gap-2.5">
+   323→                <div className="relative h-16 w-24 shrink-0 overflow-hidden rounded-xl bg-gradient-to-b from-muted/60 to-muted/20">
+   324→                  <div className="absolute inset-0 flex items-center justify-center p-1.5">
+   325→                    <MachineSprite def={m} className="h-full w-full" />
+   326→                  </div>
+   327→                </div>
+   328→                <div className="min-w-0 flex-1">
+   329→                  <div className="flex flex-wrap items-center gap-1.5">
+   330→                    <span className="text-sm font-black">{t('g_m_' + m.id)}</span>
+   331→                    {selected && <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 ring-1 ring-emerald-400/40">✓ {t('g_selected')}</span>}
+   332→                    {owned && !selected && <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-300 ring-1 ring-amber-400/30">★ {t('owned')}</span>}
+   333→                    {!owned && levelLocked && <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold text-muted-foreground">🔒 {t('g_need_level')} {localizeDigits(m.requiredLevel, locale)}</span>}
+   334→                  </div>
+   335→                  <p className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-muted-foreground">{t('g_m_' + m.id + '_d')}</p>
+   336→                  <div className="mt-1 flex flex-wrap items-center gap-1">
+   337→                    {STAT_KEYS.map((stat) => {
+   338→                      const base = m.base[stat];
+   339→                      const val = es[stat];
+   340→                      return (
+   341→                        <span key={stat} className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ring-1 ${val > 0 ? 'bg-sky-500/10 text-sky-300 ring-sky-400/30' : 'bg-muted/50 text-muted-foreground/70 ring-border'}`}>
+   342→                          {statIcon[stat]} {t(statLabel[stat])} {localizeDigits(val, locale)}
+   343→                          {val > base && <span className="text-emerald-400"> ↑</span>}
+   344→                        </span>
+   345→                      );
+   346→                    })}
+   347→                  </div>
+   348→                </div>
+   349→              </div>
+   350→
+   351→              {/* actions */}
+   352→              {owned ? (
+   353→                <div className="mt-2 space-y-1.5 border-t border-border/60 pt-2">
+   354→                  <div className="flex items-center gap-2">
+   355→                    <Button size="sm" variant={selected ? 'secondary' : 'default'} className="h-8 flex-1" disabled={selected} onClick={() => doSelect(m)}>
+   356→                      {selected ? `✓ ${t('g_selected')}` : `🔑 ${t('g_select')}`}
+   357→                    </Button>
+   358→                  </div>
+   359→                  {STAT_KEYS.map((stat) => {
+   360→                    const tier = upgradeTier(garage, m.id, stat);
+   361→                    const maxed = m.base[stat] + tier >= statCap(m, stat);
+   362→                    const cost = upgradeCost(m, stat, tier);
+   363→                    return (
+   364→                      <div key={stat} className="flex items-center gap-2 text-[11px]">
+   365→                        <span className="w-16 shrink-0 text-muted-foreground">{statIcon[stat]} {t(statLabel[stat])}</span>
+   366→                        <span className="flex gap-0.5" aria-hidden>
+   367→                          {Array.from({ length: 2 }).map((_, i) => (
+   368→                            <span key={i} className={`h-1.5 w-3 rounded-full ${i < tier ? 'bg-emerald-400' : 'bg-muted-foreground/25'}`} />
+   369→                          ))}
+   370→                        </span>
+   371→                        <span className="font-black text-sky-300">{localizeDigits(effectiveStat(m, garage, stat), locale)}</span>
+   372→                        {maxed ? (
+   373→                          <span className="ms-auto rounded-md bg-muted px-2 py-1 text-[10px] font-bold text-muted-foreground">{t('g_max')}</span>
+   374→                        ) : (
+   375→                          <Button size="sm" variant="outline" className="ms-auto h-7 px-2 text-[10px]" disabled={garage.money < cost} onClick={() => doUpgrade(m, stat)}>
+   376→                            ⬆ {t('g_upgrade')} · 💵 {localizeDigits(cost, locale)}
+   377→                          </Button>
+   378→                        )}
+   379→                      </div>
+   380→                    );
+   381→                  })}
+   382→                </div>
+   383→              ) : (
+   384→                <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/60 pt-2">
+   385→                  <span className="text-sm font-black text-amber-300">💵 {localizeDigits(m.price, locale)}</span>
+   386→                  {levelLocked ? (
+   387→                    <span className="rounded-lg bg-muted px-2.5 py-1.5 text-xs text-muted-foreground">🔒 {t('g_need_level')} {localizeDigits(m.requiredLevel, locale)}</span>
+   388→                  ) : (
+   389→                    <Button size="sm" className="h-8 glow-gold" disabled={garage.money < m.price} onClick={() => doBuy(m)}>
+   390→                      🛒 {t('g_buy')}
+   391→                    </Button>
+   392→                  )}
+   393→                </div>
+   394→              )}
+   395→            </div>
+   396→          );
+   397→        })}
+   398→      </div>
+   399→
+   400→      <Button variant="ghost" className="mt-3 w-full text-xs" onClick={() => { sfx.click(); onBack(); }}>← {t('back')}</Button>
+   401→    </div>
+   402→  );
+   403→}
+   404→
+   405→/* ================= game core ================= */
+   406→export function BoulderGameCore({ arcadeId, storageKey, levels, yardSize, onExit, helpRows, bootTitle, bootSubtitle, bootAccent, bootIcon }: BoulderGameCoreProps) {
+   407→  const { t, locale, user, perfMode } = useApp();
+   408→  useGameSession(); // immersive mode: hides platform chrome + fullscreen on touch (B1)
+   409→  const [booted, setBooted] = useState(false);
+   410→  const [phase, setPhase] = useState<Phase>('intro');
+   411→  const [garageFrom, setGarageFrom] = useState<'intro' | 'select'>('intro');
+   412→  const [levelIdx, setLevelIdx] = useState(0);
+   413→  const [game, setGame] = useState<BoulderGameState | null>(null);
+   414→  const [progress, setProgress] = useState<BoulderProgress>({ unlocked: 0, stars: {} });
+   415→  const [garage, setGarage] = useState<GarageState>(freshGarage); // hydrated from localStorage in the effect below
+   416→  const [abil, setAbil] = useState<Charges>({ dig: 0, lift: 0, cargo: false });
+   417→  const [celebrate, setCelebrate] = useState<null | { stars: 1 | 2 | 3; pushes: number; par: number; last: boolean; money: number; xp: number; levelUp: number }>(null);
+   418→  const [finalModal, setFinalModal] = useState<{ score: number; rewards: ArcadeSubmitResult | null } | null>(null);
+   419→  const boardRef = useRef<HTMLDivElement>(null);
+   420→  const [tile, setTile] = useState(40);
+   421→  const submittedRef = useRef(false);
+   422→  const touchStart = useRef<{ x: number; y: number } | null>(null);
+   423→
+   424→  /* refs mirror the latest state so every handler is synchronous & stable */
+   425→  const gameRef = useRef<BoulderGameState | null>(null);
+   426→  const garageRef = useRef<GarageState | null>(null);
+   427→  const progressRef = useRef<BoulderProgress>({ unlocked: 0, stars: {} });
+   428→  const abilRef = useRef<Charges>({ dig: 0, lift: 0, cargo: false });
+   429→  /** charges/cargo snapshot indexed by engine history length (undo-safe) */
+   430→  const abilSnap = useRef<Charges[]>([]);
+   431→  const shakeCtl = useAnimationControls();
+   432→
+   433→  const rtl = locale === 'fa' || locale === 'ar';
+   434→  const nameKey = arcadeId === 'boulderyard' ? 'game_boulderyard' : 'game_boulderyard2';
+   435→
+   436→  /* --- persistence load (garage shared across both games) --- */
+   437→  useEffect(() => {
+   438→    Promise.resolve().then(() => {
+   439→      const g = loadGarage();
+   440→      garageRef.current = g;
+   441→      setGarage(g);
+   442→      const p = loadProgress(storageKey);
+   443→      progressRef.current = p;
+   444→      setProgress(p);
+   445→    });
+   446→  }, [storageKey]);
+   447→
+   448→  const updateGarage = useCallback((g: GarageState) => {
+   449→    garageRef.current = g;
+   450→    setGarage(g);
+   451→    saveGarage(g);
+   452→  }, []);
+   453→
+   454→  const applyAbil = useCallback((c: Charges) => {
+   455→    abilRef.current = c;
+   456→    setAbil(c);
+   457→  }, []);
+   458→
+   459→  const selDef: MachineDef = getMachine(garage.selected ?? 'tractor_old');
+   460→  const es = useMemo(() => effectiveStats(selDef, garage), [selDef, garage]);
+   461→  const digMax = es.dig;
+   462→  const liftMax = es.lift;
+   463→
+   464→  const resetCharges = useCallback(() => {
+   465→    const g = garageRef.current;
+   466→    const m = getMachine(g ? g.selected : 'tractor_old');
+   467→    const stats = g ? effectiveStats(m, g) : { power: 1, dig: 0, lift: 0 };
+   468→    const init: Charges = { dig: stats.dig, lift: stats.lift, cargo: false };
+   469→    abilSnap.current = [init];
+   470→    applyAbil(init);
+   471→  }, [applyAbil]);
+   472→
+   473→  /* responsive tile size */
+   474→  useEffect(() => {
+   475→    const el = boardRef.current;
+   476→    if (!el || !game) return;
+   477→    const measure = () => {
+   478→      const w = el.clientWidth;
+   479→      const size = Math.max(24, Math.min(52, Math.floor(w / game.cols)));
+   480→      setTile(size);
+   481→    };
+   482→    measure();
+   483→    const ro = new ResizeObserver(measure);
+   484→    ro.observe(el);
+   485→    return () => ro.disconnect();
+   486→  }, [game?.cols, game]);
+   487→
+   488→  const totalStars = useMemo(() => Object.values(progress.stars).reduce((a, b) => a + b, 0), [progress]);
+   489→
+   490→  const startLevel = useCallback((idx: number) => {
+   491→    submittedRef.current = false;
+   492→    setLevelIdx(idx);
+   493→    const g = createGame(levels[idx], idx);
+   494→    gameRef.current = g;
+   495→    setGame(g);
+   496→    resetCharges();
+   497→    setCelebrate(null);
+   498→    setPhase('play');
+   499→    sfx.click();
+   500→  }, [levels, resetCharges]);
+   501→
+   502→  const restart = useCallback(() => {
+   503→    const g = gameRef.current;
+   504→    if (!g) return;
+   505→    const ng = createGame(levels[g.levelIndex], g.levelIndex);
+   506→    gameRef.current = ng;
+   507→    setGame(ng);
+   508→    resetCharges();
+   509→    sfx.click();
+   510→  }, [levels, resetCharges]);
+   511→
+   512→  const doUndo = useCallback(() => {
+   513→    const g = gameRef.current;
+   514→    if (!g || g.history.length === 0) return;
+   515→    const u = engineUndo(g);
+   516→    gameRef.current = u;
+   517→    setGame(u);
+   518→    const restored = abilSnap.current[u.history.length];
+   519→    if (restored) applyAbil(restored);
+   520→    sfx.click();
+   521→  }, [applyAbil]);
+   522→
+   523→  /* invalid ability feedback: shake + buzz (skipped in perf mode) */
+   524→  const invalidFx = useCallback(() => {
+   525→    sfx.bad();
+   526→    if (!perfMode) void shakeCtl.start({ x: [0, -8, 8, -5, 5, 0], transition: { duration: 0.3 } });
+   527→  }, [perfMode, shakeCtl]);
+   528→
+   529→  /* solve flow: stars, progress persist, driver rewards, shared-economy submit */
+   530→  const onSolve = useCallback(async (pushes: number, idx: number) => {
+   531→    const par = levels[idx].par;
+   532→    const stars = starsFor(pushes, par);
+   533→    sfx.win();
+   534→    const isLast = idx === levels.length - 1;
+   535→
+   536→    /* driver rewards (shared garage wallet across both games) */
+   537→    const firstClear = (progressRef.current.stars[idx] ?? 0) === 0;
+   538→    const reward = completionReward(idx + 1, stars, firstClear);
+   539→    let levelUp = 0;
+   540→    if (garageRef.current) {
+   541→      const res = applyReward(garageRef.current, reward);
+   542→      levelUp = res.levelUp;
+   543→      updateGarage(res.garage);
+   544→    }
+   545→    if (levelUp > 0) {
+   546→      sfx.levelup();
+   547→      toast.success(`🎖️ ${t('g_levelup_toast')}`);
+   548→    }
+   549→
+   550→    /* progress persist */
+   551→    const prev = progressRef.current;
+   552→    const next: BoulderProgress = {
+   553→      unlocked: Math.max(prev.unlocked, Math.min(idx + 1, levels.length - 1)),
+   554→      stars: { ...prev.stars, [idx]: Math.max(prev.stars[idx] ?? 0, stars) },
+   555→    };
+   556→    progressRef.current = next;
+   557→    setProgress(next);
+   558→    saveProgress(storageKey, next);
+   559→
+   560→    setCelebrate({ stars, pushes, par, last: isLast, money: reward.money, xp: reward.xp, levelUp });
+   561→
+   562→    if (submittedRef.current) return;
+   563→    submittedRef.current = true;
+   564→    const score = 100 * (idx + 1) + 50 * stars + Math.max(0, par * 3 - pushes) * 5;
+   565→    if (isLast) {
+   566→      const rewards = user ? await submitArcade(arcadeId, score, { level: idx + 1, stars, pushes }) : null;
+   567→      setFinalModal({ score, rewards });
+   568→      setCelebrate(null);
+   569→    } else if (user) {
+   570→      const r = await submitArcade(arcadeId, score, { level: idx + 1, stars, pushes });
+   571→      if (r) announceArcadeRewards(r);
+   572→    }
+   573→  }, [levels, storageKey, arcadeId, user, t, updateGarage]);
+   574→
+   575→  /* move handler (gameRef pattern — always synchronous) */
+   576→  const move = useCallback((dir: Dir) => {
+   577→    const g = gameRef.current;
+   578→    if (!g || g.solved) return;
+   579→    const r = step(g, dir, { power: es.power });
+   580→    if (!r.moved) return;
+   581→    if (r.pushed) sfx.drop(); else sfx.click();
+   582→    const next: Charges = { ...abilRef.current };
+   583→    abilSnap.current[r.state.history.length] = next;
+   584→    applyAbil(next);
+   585→    gameRef.current = r.state;
+   586→    setGame(r.state);
+   587→    if (r.state.solved) void onSolve(r.state.pushes, r.state.levelIndex);
+   588→  }, [onSolve, applyAbil, es.power]);
+   589→
+   590→  /* machine abilities (dig / grab / drop) — charges live here, not in engine snapshots */
+   591→  const doAbility = useCallback((kind: AbilityKind) => {
+   592→    const g = gameRef.current;
+   593→    if (!g || g.solved) return;
+   594→    const gar = garageRef.current;
+   595→    if (!gar) return;
+   596→    const m = getMachine(gar.selected);
+   597→    const stats = effectiveStats(m, gar);
+   598→    const a = abilRef.current;
+   599→    if (kind === 'dig' && (stats.dig <= 0 || a.dig <= 0)) return invalidFx();
+   600→    if (kind === 'grab' && (stats.lift <= 0 || a.lift <= 0 || a.cargo)) return invalidFx();
+   601→    if (kind === 'drop' && !a.cargo) return invalidFx();
+   602→    const r = step(g, g.facing, { ability: kind });
+   603→    if (!r.moved) return invalidFx(); // invalid target: no charge consumed
+   604→    const next: Charges = {
+   605→      dig: a.dig - (kind === 'dig' ? 1 : 0),
+   606→      lift: a.lift - (kind === 'grab' ? 1 : 0), // grab consumes a charge; drop is free
+   607→      cargo: kind === 'grab' ? true : kind === 'drop' ? false : a.cargo,
+   608→    };
+   609→    abilSnap.current[r.state.history.length] = next;
+   610→    applyAbil(next);
+   611→    gameRef.current = r.state;
+   612→    setGame(r.state);
+   613→    if (kind === 'dig') sfx.drop(); else sfx.capture();
+   614→    if (r.state.solved) void onSolve(r.state.pushes, r.state.levelIndex);
+   615→  }, [onSolve, applyAbil, invalidFx]);
+   616→
+   617→  const doDig = useCallback(() => doAbility('dig'), [doAbility]);
+   618→  const doGrab = useCallback(() => doAbility('grab'), [doAbility]);
+   619→  const doDrop = useCallback(() => doAbility('drop'), [doAbility]);
+   620→
+   621→  /* keyboard */
+   622→  useEffect(() => {
+   623→    if (phase !== 'play' || celebrate) return;
+   624→    const onKey = (e: KeyboardEvent) => {
+   625→      const map: Record<string, Dir> = {
+   626→        ArrowUp: 'U', ArrowDown: 'D', ArrowLeft: 'L', ArrowRight: 'R',
+   627→        w: 'U', s: 'D', a: 'L', d: 'R', W: 'U', S: 'D', A: 'L',
+   628→      };
+   629→      const dir = map[e.key];
+   630→      if (dir) { e.preventDefault(); move(dir); return; }
+   631→      if (e.key === 'D') { e.preventDefault(); doDig(); return; } // ⇧D = dig ('d' stays "move right")
+   632→      if (e.key === 'g' || e.key === 'G') { e.preventDefault(); doGrab(); return; }
+   633→      if (e.key === 'h' || e.key === 'H') { e.preventDefault(); doDrop(); return; }
+   634→      if (e.key === 'z' || e.key === 'Z') { e.preventDefault(); doUndo(); }
+   635→      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); restart(); }
+   636→    };
+   637→    window.addEventListener('keydown', onKey);
+   638→    return () => window.removeEventListener('keydown', onKey);
+   639→  }, [phase, celebrate, move, doUndo, restart, doDig, doGrab, doDrop]);
+   640→
+   641→  /* swipe */
+   642→  const onTouchStart = (e: React.TouchEvent) => {
+   643→    const t0 = e.touches[0];
+   644→    touchStart.current = { x: t0.clientX, y: t0.clientY };
+   645→  };
+   646→  const onTouchEnd = (e: React.TouchEvent) => {
+   647→    if (!touchStart.current) return;
+   648→    const t1 = e.changedTouches[0];
+   649→    const dx = t1.clientX - touchStart.current.x;
+   650→    const dy = t1.clientY - touchStart.current.y;
+   651→    touchStart.current = null;
+   652→    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+   653→    if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? 'R' : 'L');
+   654→    else move(dy > 0 ? 'D' : 'U');
+   655→  };
+   656→
+   657→  /* ---------------- render ---------------- */
+   658→  if (!booted) {
+   659→    return <RetroBoot title={bootTitle} subtitle={bootSubtitle} accent={bootAccent} cartridgeIcon={bootIcon} onDone={() => setBooted(true)} />;
+   660→  }
+   661→
+   662→  const boardW = game ? game.cols * tile : 0;
+   663→  const boardH = game ? game.rows * tile : 0;
+   664→
+   665→  const boardNode = game && (
+   666→    <div
+   667→      ref={boardRef}
+   668→      dir="ltr"
+   669→      className="relative mx-auto touch-none rounded-xl border-2 border-amber-700/40 bg-gradient-to-br from-[#2a2118] to-[#1c1610] p-1.5 shadow-xl"
+   670→      style={{ width: boardW + 12, height: boardH + 12 }}
+   671→      onTouchStart={onTouchStart}
+   672→      onTouchEnd={onTouchEnd}
+   673→      role="application"
+   674→      aria-label={t(nameKey)}
+   675→    >
+   676→      <div className="relative" style={{ width: boardW, height: boardH }}>
+   677→        {/* static tiles */}
+   678→        {Array.from({ length: game.rows * game.cols }).map((_, i) => {
+   679→          const r = Math.floor(i / game.cols), c = i % game.cols;
+   680→          const isWall = game.wall[i];
+   681→          const kind = isWall ? 'wall' : game.targets.has(i) ? 'target' : game.pits.has(i) ? 'pit' : game.gates.has(i) ? 'gate' : 'floor';
+   682→          return (
+   683→            <div key={i} className="absolute" style={{ left: c * tile, top: r * tile, width: tile, height: tile }}>
+   684→              <Tile kind={kind} gates={kind === 'gate' ? game.gates.get(i) : undefined} />
+   685→            </div>
+   686→          );
+   687→        })}
+   688→        {/* boulders */}
+   689→        {[...game.boulders].map((b) => {
+   690→          const r = Math.floor(b / game.cols), c = b % game.cols;
+   691→          return (
+   692→            <motion.div
+   693→              key={b}
+   694→              className="absolute"
+   695→              style={{ width: tile, height: tile, zIndex: 2 }}
+   696→              initial={false}
+   697→              animate={{ x: c * tile, y: r * tile }}
+   698→              transition={{ type: 'tween', duration: 0.11, ease: 'easeOut' }}
+   699→            >
+   700→              <Boulder />
+   701→            </motion.div>
+   702→          );
+   703→        })}
+   704→        {/* player machine */}
+   705→        <motion.div
+   706→          className="absolute"
+   707→          style={{ width: tile, height: tile, zIndex: 3 }}
+   708→          initial={false}
+   709→          animate={{ x: (game.player % game.cols) * tile, y: Math.floor(game.player / game.cols) * tile }}
+   710→          transition={{ type: 'tween', duration: Math.max(0.05, 0.09 / selDef.speed), ease: 'easeOut' }}
+   711→        >
+   712→          <MachineToken def={selDef} facing={game.facing} carrying={abil.cargo} perf={perfMode} />
+   713→        </motion.div>
+   714→      </div>
+   715→    </div>
+   716→  );
+   717→
+   718→  const dpad = (
+   719→    <div className="mx-auto grid w-max grid-cols-3 gap-1.5" aria-hidden>
+   720→      <span />
+   721→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('U')} aria-label="up">▲</Button>
+   722→      <span />
+   723→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('L')} aria-label="left">◀</Button>
+   724→      <Button variant="outline" className="h-12 w-12 p-0 text-[10px]" onClick={doUndo} aria-label="undo">↺</Button>
+   725→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('R')} aria-label="right">▶</Button>
+   726→      <span />
+   727→      <Button variant="outline" className="h-12 w-12 p-0 text-lg" onClick={() => move('D')} aria-label="down">▼</Button>
+   728→      <span />
+   729→    </div>
+   730→  );
+   731→
+   732→  /* ability buttons — only for machines that own the charges (≥56px touch) */
+   733→  const abilityBtn = 'h-14 min-w-[64px] flex-col gap-0.5 rounded-xl p-1 text-[10px] font-bold leading-none';
+   734→  const abilities = (
+   735→    <div className="flex flex-col gap-2" aria-label="machine abilities">
+   736→      {digMax > 0 && (
+   737→        <Button variant="outline" className={abilityBtn} disabled={abil.dig <= 0} onClick={doDig} aria-label={t('g_dig')}>
+   738→          <span className="text-xl leading-none">🪣</span>
+   739→          <span>{t('g_dig')} · {localizeDigits(abil.dig, locale)}</span>
+   740→        </Button>
+   741→      )}
+   742→      {liftMax > 0 && (
+   743→        <Button variant="outline" className={`${abilityBtn} ${abil.cargo ? 'border-violet-400/70 bg-violet-500/10' : ''}`} disabled={abil.lift <= 0 && !abil.cargo} onClick={abil.cargo ? doDrop : doGrab} aria-label={abil.cargo ? t('g_drop') : t('g_grab')}>
+   744→          <span className="text-xl leading-none">{abil.cargo ? '📦' : '🏗️'}</span>
+   745→          <span>{abil.cargo ? t('g_drop') : t('g_grab')}{!abil.cargo && abil.lift > 0 ? ` · ${localizeDigits(abil.lift, locale)}` : ''}</span>
+   746→        </Button>
+   747→      )}
+   748→    </div>
+   749→  );
+   750→  const hasAbilities = digMax > 0 || liftMax > 0;
+   751→
+   752→  /* machine chips for the in-game HUD */
+   753→  const machineChips = (
+   754→    <>
+   755→      <span className="flex items-center gap-1.5 rounded-lg bg-emerald-500/10 px-2 py-1 text-xs font-bold text-emerald-300 ring-1 ring-emerald-400/30">
+   756→        <span className="inline-block h-4 w-7 shrink-0"><MachineSprite def={selDef} /></span>
+   757→        <span className="max-w-28 truncate">{t('g_m_' + selDef.id)}</span>
+   758→      </span>
+   759→      {digMax > 0 && (
+   760→        <span className="rounded-lg bg-sky-500/10 px-2 py-1 text-xs font-bold text-sky-300 ring-1 ring-sky-400/30">🪣 {localizeDigits(abil.dig, locale)}</span>
+   761→      )}
+   762→      {liftMax > 0 && (
+   763→        <span className="rounded-lg bg-violet-500/10 px-2 py-1 text-xs font-bold text-violet-300 ring-1 ring-violet-400/30">🏗️ {localizeDigits(abil.lift, locale)}</span>
+   764→      )}
+   765→      {abil.cargo && (
+   766→        <span className="rounded-lg bg-amber-500/10 px-2 py-1 text-xs font-bold text-amber-300 ring-1 ring-amber-400/30">📦 {t('g_cargo')}</span>
+   767→      )}
+   768→    </>
+   769→  );
+   770→
+   771→  return (
+   772→    <div className="mx-auto max-w-3xl px-3 py-4" dir={rtl ? 'rtl' : 'ltr'}>
+   773→      {/* ---------- intro ---------- */}
+   774→      {phase === 'intro' && (
+   775→        <div className="royal-card mx-auto max-w-md rounded-3xl p-6 text-center">
+   776→          <div className="mx-auto mb-3 grid h-16 w-16 place-items-center rounded-2xl bg-gradient-to-br from-emerald-400/30 to-emerald-700/30 text-3xl shadow-lg ring-1 ring-emerald-400/40">
+   777→            {arcadeId === 'boulderyard' ? '🪨' : '🕳️'}
+   778→          </div>
+   779→          <h2 className="gold-text text-2xl font-black">{t(nameKey)}</h2>
+   780→          <p className="mt-1 text-xs text-muted-foreground">
+   781→            {localizeDigits(levels.length, locale)} {t('by_levels')} · ⭐ {localizeDigits(totalStars, locale)}/{localizeDigits(levels.length * 3, locale)}
+   782→            {progress.unlocked > 0 && ` · ${t('by_best')}: ${t('by_level')} ${localizeDigits(progress.unlocked + 1, locale)}`}
+   783→          </p>
+   784→          {/* driver chip */}
+   785→          <div className="mx-auto mt-3 flex w-max items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-1.5 text-xs">
+   786→            <span className="inline-block h-5 w-9"><MachineSprite def={selDef} /></span>
+   787→            <span className="font-bold text-emerald-300">{t('g_m_' + selDef.id)}</span>
+   788→            <span className="text-muted-foreground">· 🎖️ {localizeDigits(garage.driverLevel, locale)} · 💵 {localizeDigits(garage.money, locale)}</span>
+   789→          </div>
+   790→          <div className="mt-4 space-y-2 text-start">
+   791→            {helpRows.map((h, i) => (
+   792→              <div key={i} className="flex items-center gap-2 rounded-xl bg-muted/50 px-3 py-2 text-xs">
+   793→                <span className="text-base">{h.icon}</span>
+   794→                <span>{t(h.key)}</span>
+   795→              </div>
+   796→            ))}
+   797→          </div>
+   798→          <div className="mt-5 flex gap-2">
+   799→            <Button className="flex-1 glow-gold" onClick={() => startLevel(Math.min(progress.unlocked, levels.length - 1))}>
+   800→              ▶ {progress.unlocked > 0 ? t('by_continue') : t('by_start')}
+   801→            </Button>
+   802→            <Button variant="outline" onClick={() => { setPhase('select'); sfx.click(); }}>{t('by_levels')}</Button>
+   803→          </div>
+   804→          <Button variant="outline" className="mt-2 w-full" onClick={() => { setGarageFrom('intro'); setPhase('garage'); sfx.click(); }}>🚜 {t('g_open_garage')}</Button>
+   805→          <Button variant="ghost" className="mt-2 text-xs text-muted-foreground" onClick={() => { sfx.click(); onExit(); }}>
+   806→            ← {t('back_park')}
+   807→          </Button>
+   808→        </div>
+   809→      )}
+   810→
+   811→      {/* ---------- level select ---------- */}
+   812→      {phase === 'select' && (
+   813→        <div className="royal-card mx-auto max-w-lg rounded-3xl p-5">
+   814→          <div className="mb-3 flex items-center justify-between">
+   815→            <h3 className="text-lg font-black gold-text">{t('by_levels')}</h3>
+   816→            <Badge>⭐ {localizeDigits(totalStars, locale)}/{localizeDigits(levels.length * 3, locale)}</Badge>
+   817→          </div>
+   818→          {/* machine slot */}
+   819→          <div className="mb-3 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+   820→            <span className="hidden text-[10px] uppercase tracking-wide text-muted-foreground sm:inline">{t('g_machine_slot')}</span>
+   821→            <span className="inline-block h-7 w-12 shrink-0"><MachineSprite def={selDef} /></span>
+   822→            <span className="truncate text-sm font-black text-emerald-300">{t('g_m_' + selDef.id)}</span>
+   823→            <Button variant="ghost" size="sm" className="ms-auto h-8 shrink-0 text-xs" onClick={() => { setGarageFrom('select'); setPhase('garage'); sfx.click(); }}>🔧 {t('g_change')}</Button>
+   824→          </div>
+   825→          <div className="nice-scroll max-h-[52dvh] space-y-4 overflow-y-auto pe-1">
+   826→            {[1, 2, 3].map((yard) => (
+   827→              <div key={yard}>
+   828→                <div className="mb-1.5 text-xs font-bold text-muted-foreground">{t('by_yard')} {localizeDigits(yard, locale)}</div>
+   829→                <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
+   830→                  {levels.slice((yard - 1) * yardSize, yard * yardSize).map((_, i) => {
+   831→                    const idx = (yard - 1) * yardSize + i;
+   832→                    const locked = idx > progress.unlocked;
+   833→                    const st = progress.stars[idx] ?? 0;
+   834→                    return (
+   835→                      <button
+   836→                        key={idx}
+   837→                        disabled={locked}
+   838→                        onClick={() => startLevel(idx)}
+   839→                        className={`flex h-14 flex-col items-center justify-center rounded-xl border text-sm font-black transition ${
+   840→                          locked ? 'border-border/50 bg-muted/30 text-muted-foreground/50' : 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:border-amber-400 hover:bg-amber-500/20'
+   841→                        }`}
+   842→                        aria-label={`${t('by_level')} ${idx + 1}${locked ? ' 🔒' : ''}`}
+   843→                      >
+   844→                        <span>{locked ? '🔒' : localizeDigits(idx + 1, locale)}</span>
+   845→                        {!locked && <span className="text-[9px] leading-none">{'⭐'.repeat(st) || '·'}</span>}
+   846→                      </button>
+   847→                    );
+   848→                  })}
+   849→                </div>
+   850→              </div>
+   851→            ))}
+   852→          </div>
+   853→          <Button variant="ghost" className="mt-3 w-full text-xs" onClick={() => { setPhase('intro'); sfx.click(); }}>← {t('back')}</Button>
+   854→        </div>
+   855→      )}
+   856→
+   857→      {/* ---------- garage ---------- */}
+   858→      {phase === 'garage' && (
+   859→        <GarageScreen garage={garage} update={updateGarage} onBack={() => { setPhase(garageFrom); sfx.click(); }} />
+   860→      )}
+   861→
+   862→      {/* ---------- play ---------- */}
+   863→      {phase === 'play' && game && (
+   864→        <div>
+   865→          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+   866→            <div className="flex flex-wrap items-center gap-1.5 text-sm font-black">
+   867→              <span className="rounded-lg bg-amber-500/15 px-2 py-1 text-amber-300">{t('by_level')} {localizeDigits(game.levelIndex + 1, locale)}</span>
+   868→              <span className="rounded-lg bg-muted px-2 py-1 text-xs text-muted-foreground">
+   869→                {t('by_pushes')}: {localizeDigits(game.pushes, locale)} / {t('by_par')} {localizeDigits(levels[game.levelIndex].par, locale)}
+   870→              </span>
+   871→              {machineChips}
+   872→            </div>
+   873→            <div className="flex items-center gap-1">
+   874→              <Button variant="outline" size="sm" className="h-9" onClick={restart}>⟳ {t('by_restart')}</Button>
+   875→              <Button variant="outline" size="sm" className="h-9" onClick={() => { setPhase('select'); setGame(null); gameRef.current = null; sfx.click(); }}>☰ {t('by_levels')}</Button>
+   876→              <Button variant="ghost" size="sm" className="h-9" onClick={() => { sfx.click(); onExit(); }}>✕</Button>
+   877→            </div>
+   878→          </div>
+   879→          <motion.div animate={shakeCtl} className="mx-auto w-max">
+   880→            {boardNode}
+   881→          </motion.div>
+   882→          <div className="mt-4 flex items-start justify-center gap-3 sm:gap-6">
+   883→            {dpad}
+   884→            {hasAbilities && abilities}
+   885→          </div>
+   886→          <p className="mt-3 hidden text-center text-[10px] text-muted-foreground md:block">
+   887→            {t('by_keys_hint')}
+   888→          </p>
+   889→          {hasAbilities && (
+   890→            <p className="mt-1 hidden text-center text-[10px] text-muted-foreground md:block">
+   891→              {t('g_keys_abilities')}
+   892→            </p>
+   893→          )}
+   894→        </div>
+   895→      )}
+   896→
+   897→      {/* ---------- solve celebration ---------- */}
+   898→      <AnimatePresence>
+   899→        {celebrate && (
+   900→          <motion.div
+   901→            className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm"
+   902→            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+   903→          >
+   904→            <motion.div
+   905→              className="royal-card w-full max-w-xs rounded-3xl p-6 text-center"
+   906→              initial={{ scale: 0.7, y: 30 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.8, opacity: 0 }}
+   907→              transition={{ type: 'spring', stiffness: 260, damping: 20 }}
+   908→            >
+   909→              <div className="text-4xl">🎉</div>
+   910→              <h3 className="mt-2 text-xl font-black gold-text">{t('by_solved')}</h3>
+   911→              <div className="my-3 flex justify-center gap-1.5">
+   912→                {[1, 2, 3].map((i) => (
+   913→                  <motion.span
+   914→                    key={i}
+   915→                    className={`text-4xl ${i <= celebrate.stars ? '' : 'opacity-25 grayscale'}`}
+   916→                    initial={{ scale: 0, rotate: -40 }}
+   917→                    animate={{ scale: 1, rotate: 0 }}
+   918→                    transition={{ delay: 0.15 * i, type: 'spring', stiffness: 300, damping: 12 }}
+   919→                  >⭐</motion.span>
+   920→                ))}
+   921→              </div>
+   922→              <p className="text-sm text-muted-foreground">
+   923→                {t('by_pushes')}: <b className="text-foreground">{localizeDigits(celebrate.pushes, locale)}</b> · {t('by_par')}: {localizeDigits(celebrate.par, locale)}
+   924→              </p>
+   925→              <p className="mt-1.5 rounded-xl bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-300 ring-1 ring-emerald-400/30">
+   926→                {t('g_earned')}: 💵 +{localizeDigits(celebrate.money, locale)} · ✦ +{localizeDigits(celebrate.xp, locale)}
+   927→              </p>
+   928→              {celebrate.levelUp > 0 && (
+   929→                <p className="mt-1 text-xs font-black text-amber-300">🎖️ {t('g_levelup_toast')}</p>
+   930→              )}
+   931→              {!celebrate.last && (
+   932→                <Button className="mt-4 w-full glow-gold" onClick={() => startLevel(Math.min(levelIdx + 1, levels.length - 1))}>
+   933→                  {t('by_next')} →
+   934→                </Button>
+   935→              )}
+   936→              <Button variant="outline" className="mt-2 w-full" onClick={() => { setCelebrate(null); setPhase('select'); setGame(null); gameRef.current = null; sfx.click(); }}>
+   937→                ☰ {t('by_levels')}
+   938→              </Button>
+   939→            </motion.div>
+   940→          </motion.div>
+   941→        )}
+   942→      </AnimatePresence>
+   943→
+   944→      {/* campaign finale — shared result modal */}
+   945→      <ArcadeResultModal
+   946→        open={!!finalModal}
+   947→        title={t('by_campaign_done')}
+   948→        subtitle={t('by_yard_done')}
+   949→        score={finalModal?.score ?? 0}
+   950→        rewards={finalModal?.rewards ?? null}
+   951→        emoji="🏆"
+   952→        onAgain={() => { setFinalModal(null); setPhase('select'); }}
+   953→        onExit={() => { setFinalModal(null); onExit(); }}
+   954→      />
+   955→    </div>
+   956→  );
+   957→}
+   958→
+   959→function Badge({ children }: { children: React.ReactNode }) {
+   960→  return <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs font-bold text-amber-300">{children}</span>;
+   961→}
+   962→

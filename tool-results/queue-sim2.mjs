@@ -1,0 +1,10 @@
+import { io } from 'socket.io-client';
+const token = process.argv[2];
+const sock = io('http://localhost:3003', { transports: ['polling'], extraHeaders: { cookie: `doi_session=${token}` } });
+sock.on('connect', () => { console.log('connected'); sock.emit('queue:join', { ranked: true }); });
+sock.on('queued', () => console.log('queued', new Date().toISOString().slice(11,19)));
+sock.on('match', (d) => { console.log('MATCH side', d.yourSide, 'ranked', d.ranked, new Date().toISOString().slice(11,19)); });
+sock.on('state', (d) => { const s = typeof d.state==='string'?JSON.parse(d.state):d.state; console.log('state ply', s.ply, 'turn', s.turn); });
+sock.on('error', (d) => { console.log('ERR', JSON.stringify(d)); });
+sock.on('disconnect', (r) => console.log('disc', r));
+setTimeout(() => process.exit(0), 70_000);

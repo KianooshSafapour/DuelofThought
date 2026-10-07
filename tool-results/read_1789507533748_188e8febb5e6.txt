@@ -1,0 +1,290 @@
+     1→# Worklog — "Duel of Ideas" (دوئل ایده‌ها) Gaming Platform
+     2→
+     3→## Project Vision
+     4→A Persian-first (fa/en/ar/tr) PWA gaming park. Flagship game: **Duel of Ideas** — a 9×7 (63-cell) mathematical strategy board game by Iranian mathematicians. Players drop pieces into columns (gravity like Connect-4) and win by owning **4 of a kind** (e.g., four 5s) or a **run of 4 consecutive numbers** (e.g., 2,3,4,5). Numberless cells are strategic blockers. Platform includes: PvAI, local PvP, online multiplayer (socket.io), ELO leaderboard, coins/XP/levels, achievements, daily quests, in-game store (skins/avatars/backgrounds/titles), admin dashboard (analytics, bans, reports, moderation), PWA support.
+     5→
+     6→## Research applied
+     7→- Martinez et al. 2023: board games → fluid intelligence, working memory, social skills
+     8→- Trends in Neuroscience & Education 2021: board games → executive function
+     9→- SDT (Deci/Ryan): autonomy (customization/store), competence (levels/achievements), relatedness (multiplayer/chat)
+    10→- Flow (Csikszentmihalyi): AI difficulty tiers + rated matchmaking to balance challenge/skill
+    11→
+    12→---
+    13→Task ID: 0
+    14→Agent: orchestrator (main)
+    15→Task: project setup, schema, engine, core APIs, i18n, main UI
+    16→
+    17→Work Log:
+    18→- Explored env: Next 16, React 19, Tailwind 4, shadcn/ui, Prisma/SQLite, recharts, zustand, framer-motion, zod
+    19→- Academic research via web-search (see above)
+    20→- Writing prisma schema + engine + i18n + APIs + UI (entries below)
+    21→
+    22→Stage Summary:
+    23→- in progress
+    24→
+    25→---
+    26→Task ID: 0 (orchestrator progress update)
+    27→Agent: main
+    28→Task: Core platform built — handing off parallel tasks 11-a, 12-b, 13-c
+    29→
+    30→Work Log:
+    31→- Prisma schema (User/Session/GameResult/StoreItem/Purchase/UserAchievement/UserQuest/Report/AuditLog/Announcement/BannedWord/ChatLog/AnalyticsEvent) pushed + seeded (admin/admin pw DuelAdmin@2024, 38 store items, 8 demo players, word filter, announcement)
+    32→- Engine validated: CLASSIC board (photo transcription + 4 fairness patches), detectWin (KIND/RUN), applyMove, HARD AI depth-4 alphabeta (~150ms/game)
+    33→- Full i18n fa/en/ar/tr (~170 keys each) + RTL + Persian digits
+    34→- APIs: auth (register/login/guest/logout/me with scrypt+hashed session tokens), game/submit (server-side replay anti-cheat — verified rejecting fake wins), leaderboard, store (buy/equip), quests, achievements, profile, reports, announcements, admin/* (stats/users/reports/words/announcements/items/chats+audit), mp/* internal (verify/result/words/chat)
+    35→- gameplay.ts: rewards + hourly anti-farm caps (PVE 350/h, LOCAL 40/h), ELO K=32, level curve (100+60*(L-1) xp), quest bumps, achievement unlocks
+    36→- Frontend: AppShell SPA (nav/hub/play/store/leaderboard/profile/admin), HubView (park grid/quests/announcements), PlayView (4 boards, AI tiers, local, online lobby), GameBoard (wooden skin, two-corner numerals like physical board, drop anim, win pulse), GameScreen (modes, AI turns, resign, hint, chat, rewards+insight card), PixelSprite procedural pixel art, BackgroundCanvas (velvet/stars/city/dunes), WebAudio sfx, PWA manifest+SW+icons
+    37→- SECURITY FIX: passwordHash leak in toSafeUser — stripped
+    38→- DEV SERVER NOTE: bash-spawned processes die between tool calls; the running server was started via python double-fork daemon (PID ~2994). To restart: python3 double-fork `bun run dev`.
+    39→
+    40→Stage Summary:
+    41→- Core platform functional; APIs verified with curl (auth/submit anti-cheat/store/leaderboard)
+    42→- NEXT: subagents → 11-a socket service, 12-b admin UI, 13-c store/leaderboard/profile UI
+    43→---
+    44→Task ID: 12-b
+    45→Agent: frontend-styling-expert
+    46→Task: Admin dashboard UI
+    47→
+    48→Work Log:
+    49→- Read worklog, i18n dict (used only existing keys + bilingual inline for admin-only labels), store/app.ts, lib/api.ts, all 6 admin API routes (stats/users/reports/words/announcements/items incl. view=chats), AppShell + HubView conventions, prisma models
+    50→- Built src/components/admin/AdminView.tsx (~1220 lines, single file, named export AdminView) with lock screen for non-admins
+    51→- useAdminData hook: derived loading from last-completed request (url+tick identity) — passes react-compiler lint (no setState in effect body); optimistic `patch()` used for announcement active + store price/active toggles
+    52→- Overview: 8 royal-card stats (grid-cols-2 sm:grid-cols-4), LineChart gamesPerDay (#fbbf24), BarCharts winTypes/modes/firstMove (dict labels w/ truncation, mode labels bilingual), avg_moves badge, economy card (minted/spent/purchases + top items); RTL: XAxis reversed + YAxis orientation flip for fa/ar
+    53→- Users: 400ms debounced search, 25/page pagination, full table (banned badge + reason/until, online dot, role badges), DropdownMenu actions → Ban dialog (permanent switch + days + reason), grant-coins dialog (±chips), promote/demote AlertDialog confirm; self/admin-target guards
+    54→- Reports: status pills (ALL/OPEN/ACTIONED/DISMISSED), cards w/ reason + chatExcerpt, dismiss/ban7/banPerm actions
+    55→- Content: word filter (add w/ severity Select, delete, sev_1..3 badges) + announcements (active Switch → PATCH, create dialog w/ 8 validated locale inputs + kind select)
+    56→- Store: table w/ rarity color badges, inline price edit + save → POST {code,price}, active Switch, purchasedBy
+    57→- Chats: flagged-only Switch → view=chats&flagged=1|0, masked/flagged-words badges, room chips
+    58→- Verified in headless browser end-to-end (admin login → every tab → menus/dialogs): zero page errors; tsc + eslint clean for this file
+    59→
+    60→Stage Summary:
+    61→- Admin console complete & routed via AppShell lazy import; all data through api helper with skeletons + error toasts; Persian digits via localizeDigits everywhere; logical (ms-/me-/ps-/pe-) spacing; no new deps, no other files touched
+    62→- Note: bannedUsers/guests/lastSeen/rating/economy labels not in i18n dict → bilingual inline (acceptable per admin-console convention)
+    63→---
+    64→Task ID: 13-c
+    65→Agent: frontend-styling-expert
+    66→Task: Store + Leaderboard + Profile UIs
+    67→
+    68→Work Log:
+    69→- Read worklog, i18n (~170 keys × 4 locales, unmodified), app store, api.ts, content.ts (STORE_ITEMS/RARITY_META), PixelSprite, HubView/AppShell style refs, all 6 target API routes (store GET/POST/equip, leaderboard, achievements, game/history, profile PATCH/GET, reports) to match response shapes exactly.
+    70→- StoreView.tsx: royal header (title/sub + glowing coins pill), shadcn Tabs for 6 categories, item grid (2/3/4 cols, nice-scroll max-h-[70dvh]); per-category previews (PieceDisc side 1 + drop-shadow glow for EPIC/LEGENDARY, AvatarBubble, pure-CSS board palette cell/cell2/hole/numeral, background gradient + accent dot, 🎉 gradient-clip text effect, 👑 title); rarity Badge colored via RARITY_META; price row 🪙/FREE; owned+equipped badges; buy gated by coins & requiredLevel with tooltips (not_enough / need_level X); AlertDialog buy confirm → POST /api/store → sfx.coin + purchased toast + owned/coins update + refreshSession; equip → POST /api/store/equip → patchUser + equipped_done toast; error mapping COINS/LEVEL/OWNED/AUTH.
+    71→- LeaderboardView.tsx: sort tabs (rating/wins/level, refetch with live-guard), 🥇🥈🥉 podium (1st elevated + glow-gold, AvatarBubble, titleItem, rating), tier Badges (diamond≤3/platinum≤10/gold≤25/silver≤40/bronze) with distinct palettes, sticky-header table (rank+tier, avatar+username+title+you/guest chips, level, rating, wins, win-rate%), amber-highlighted current-user row, 📍 lb_you footer with localized rank, skeleton loading + error retry.
+    72→- ProfileView.tsx: guest guard → auth_no + login hint card; header card (AvatarBubble 72 glow, username, 👑 title badge, guest badge, level chip + XP Progress into/need via levelFromXpT, coins, rating, member-since via Intl.DateTimeFormat); 6 stat cards (Trophy/XCircle/Scale/Gamepad2/Flame/Percent incl. win-rate); bio editor (140-char counter, save disabled when unchanged, BAD_BIO→bio_bad toast); showcase picker (unlocked only, max 3, optimistic PATCH + revert on error, 🏆 chips); achievements grid (static Record<string,LucideIcon> incl. verified names, Meteor→Sparkles fallback, rarity-tinted borders, progress bars, reward coins, unlock date); match history (mode badges PVE/ONLINE/local, opponent resolution via p1Name/p2Name, endReason labels KIND/RUN/FULL/RESIGN/TIMEOUT from existing keys, moves, Intl.RelativeTimeFormat time-ago, result badges, no_history empty state); settings (sound Switch → PATCH + setSoundEnabled, language shadcn Select → setLocale); collapsible report form (target, 5 reason Select options, details) → POST /api/reports → report_sent toast.
+    73→- Patterns: all numbers via localizeDigits; every string via t() with existing keys; RTL-safe logical classes (ms/me/ps/pe/start/end/text-start); effects avoid sync setState (react-hooks/set-state-in-effect compliant); session sync via refreshSession + patchUser.
+    74→- Verified in headless browser (real flows): registered fresh user → store buy (9999→9819 coins pill sync + owned badge), equip (✓ فعال), level-lock 🔒 tooltips, not_enough tooltip on disabled buy; leaderboard podium/tiers/11 rows/amber me-row highlight/📍 rank #11 footer, all 3 sorts; profile bio save toast + counter ۲۴/۱۴۰, showcase card, 19 locked achievements with progress ۰/۱ + rewards, empty history state, sound switch toggle, fa↔en language switch (dir rtl/ltr), report submit → گزارش ثبت شد; mobile 390px store grid 2-per-row, no overflow. Zero console errors from the three views. VLM design review: store PASS, leaderboard PASS, profile PASS (achievement-counter flag was a VLM misread; DOM shows correct ۰/۱ Persian digits).
+    75→
+    76→Stage Summary:
+    77→- 3 files replaced (StoreView/LeaderboardView/ProfileView placeholders), no other files touched, no new deps.
+    78→- bunx tsc --noEmit filtered to the three files: empty. bun run lint filtered: empty (pre-existing errors elsewhere untouched).
+    79→- All API contracts matched: store GET {items,owned,me}, POST errors COINS/LEVEL/OWNED/NOT_FOUND; equip POST; leaderboard ?sort=; achievements GET; game/history GET; profile PATCH (bio/soundOn/showcase/locale); reports POST.
+    80→
+    81→---
+    82→Task ID: 11-a
+    83→Agent: main (orchestrator — subagent timed out, built directly)
+    84→Task: Multiplayer socket.io mini-service
+    85→
+    86→Work Log:
+    87→- Created mini-services/duel-socket/ (package.json, engine.ts copied from src/lib/game, index.ts ~430 lines, README.md)
+    88→- Cookie-based auth via /api/mp/verify with 5-min token cache; banned users rejected
+    89→- FIFO matchmaking with ELO tolerance widening (+100/5s); ranked/casual; private 4-char room codes
+    90→- Server-authoritative moves via shared engine; 45s move timer → TIMEOUT; 60s disconnect grace
+    91→- Chat filter replicating moderation.ts normalization (Persian/Arabic variants, zero-width, repeats); severity 3 = block + auto-resign; logged via /api/mp/chat
+    92→- Results POSTed to /api/mp/result (idempotent by roomId); per-player game:rewards emitted
+    93→- E2E tested with 2 simulated players: match → moves → game over → rewards (A: 60 coins/80xp/+16 elo; B: 12/20/-16)
+    94→- Fixed bug: TIMEOUT endReason was broadcast as RESIGN type
+    95→
+    96→Stage Summary:
+    97→- Service runs on :3003 via bun --hot (daemonized by orchestrator), health endpoint on GET /
+    98→- Client contract matches PlayView exactly (io('/?XTransformPort=3003'), same event names)
+    99→
+   100→---
+   101→Task ID: 14 (orchestrator)
+   102→Agent: main
+   103→Task: E2E browser verification + online multiplayer integration + bug fixes
+   104→
+   105→Work Log:
+   106→- E2E via agent-browser (through Caddy gateway :81 like real users):
+   107→  * Hub renders (RTL fa, royal theme, starfield bg) ✓
+   108→  * Play lobby: 4 boards, AI tiers, local, online (guest-locked) ✓
+   109→  * AI game: board orientation FIX (was upside-down vs physical board), gravity placement verified, AI responds ✓
+   110→  * Register via UI (demo_hero) → PVE win → rewards modal (coins/XP/achievements) ✓ — DB exact: 250+50+180+8=488 coins ✓
+   111→  * Quests progress (q_moves25 21/25, q_win2 1/2) ✓
+   112→  * Store: pixel-art previews, purchase verified 488→308, equip ✓
+   113→  * Leaderboard podium + table + tiers ✓
+   114→  * Profile: stats/XP bar/bio/showcase/history ✓
+   115→  * Admin: all 6 tabs, stat cards, charts live ✓
+   116→  * ONLINE 2-browser test: matchmaking → turns synced → chat both ways → resign → game over → rewards+ELO (admin 1000→984, hero→1016) → rematch → rejoin-on-refresh ✓
+   117→- FIXES made during E2E:
+   118→  * Board display upside-down (d2l row flip)
+   119→  * insightFor captured count always 0
+   120→  * Online crash: plain JSON state missing counts → server serializes counts + client defensive normalization
+   121→  * Online game-over modal never opened (settling only set in local flow)
+   122→  * Socket reconnect didn't rebind to room (chat/state lost) → rejoinIfNeeded rebinding + grace-cancel
+   123→  * Finished-room lockout: players couldn't re-queue after game end
+   124→  * Online modal title now Victory/Defeat per side (was win-type for both)
+   125→  * passwordHash leak in toSafeUser (security)
+   126→- Clean-room verification: fresh users clean_one/clean_two → ranked match → resign → both modals correct
+   127→
+   128→Stage Summary:
+   129→- All core flows browser-verified. Lint 0 errors. tsc clean (project files). Dev server stable.
+   130→
+   131→---
+   132→Task ID: 15-16 (orchestrator)
+   133→Agent: main
+   134→Task: Security review + handoff for recurring webDevReview
+   135→
+   136→Work Log:
+   137→- Security checklist passed: scrypt+salt hashing; SHA-256-hashed session tokens in httpOnly/sameSite cookies; passwordHash stripped from all responses; RBAC on all /api/admin/*; ban enforcement (login/session-kill/socket-verify); rate limits on auth/submit/purchase/report/quest/chat; Zod input validation everywhere; server-side replay anti-cheat on game results; hourly reward caps vs farming; x-internal-key for service APIs; profanity filter w/ Persian-Arabic normalization + auto-punish escalation; audit log for admin actions; Prisma parameterized (no SQLi); React escaping (no XSS).
+   138→- Known demo credentials: admin / DuelAdmin@2024 (seeded; change via ADMIN_PASSWORD env + re-seed for production).
+   139→- Runs: Next dev :3000 (daemonized), duel-socket :3003 (bun --hot, daemonized). Mini-service logs: .zscripts/mini-service-duel-socket.log
+   140→
+   141→Stage Summary:
+   142→- Platform demo-ready. For next reviewer: check dev.log + mini-service log, run agent-browser flows listed in Task 14 entry, and extend content (more skins/achievements/quests) or tune AI difficulty pacing.
+   143→
+   144→---
+   145→Task ID: R2 (webDevReview round 2)
+   146→Agent: main
+   147→Task: QA sweep + styling/features round (fireworks, emotes, dialogs, keyboard, skin sync)
+   148→
+   149→Work Log:
+   150→- QA sweep: all views error-free; fixed Radix a11y warning (aria-describedby on 4 DialogContents); console clean
+   151→- FEATURE — WinFireworks: full-screen procedural celebration canvas driven by equipped EFFECT skin (confetti rects / bouncing coins w/ sparkle / chunky pixels / phoenix embers+trails); fires on victory in all modes, auto-fades 3.4s (src/components/game/WinFireworks.tsx)
+   152→- FEATURE — Emotes in online matches: 5-emote bar (🤝😅⏰🙏😄) under controls; floating animated bubbles top-center; server allowlist already existed, client wired (send/receive/timeout-clear)
+   153→- FEATURE — Rules & About dialogs: footer links now open styled dialogs (rules_full/rules_tip + about_text + research citations as chips); version bumped 1.0→1.1
+   154→- FEATURE — Keyboard controls: keys 1-9 drop pieces into columns (input-field-safe); ⌨️ 1–9 hint chip in game controls; documented inside Rules dialog
+   155→- FIX — Opponent piece skin was hardcoded jade in online games: server now transmits pieceSkin/boardSkin in match payload (createRoom + rejoinIfNeeded), client renders it
+   156→- FIX — Resume-after-refresh: clicking Ranked while bound to an ACTIVE room now rejoins the live match (previously silently blocked → stuck in lobby)
+   157→- Browser-verified: rules dialog ✓, keyboard drop ✓, victory run (4,5,6,7) with fireworks canvas ✓, economy exact (622 = 540+8+70+4 level bonus) ✓, level-up 2 ✓, online match with emote delivery (B saw 🤝 clean_one bubble) ✓, opponent terracotta skin rendered ✓, resign → server report + B rewards modal ✓
+   158→
+   159→Stage Summary:
+   160→- Lint 0 errors; tsc clean; both services healthy; all round-2 features live and browser-verified
+   161→
+   162→---
+   163→Task ID: R3 (webDevReview round 3)
+   164→Agent: main (orchestrator)
+   165→Task: QA sweep + Round-3 features (daily check-in, undo, ghost preview, move timer, rating sparkline, new cosmetics, styling polish)
+   166→
+   167→Work Log:
+   168→- QA: browser-swept hub/play(AI+daily board)/store/leaderboard/profile/admin — zero page errors; resign flow + defeat modal + insight card verified
+   169→- CRITICAL BUG FIXED — PWA service worker (public/sw.js) cached /_next/static/* cache-first; in dev those chunk URLs are stable while content changes → stale-chunk poisoning caused blank pages (Z splash) and silently pinned the app to old bundles after every rebuild. Fix: SW v2 = doi-v2 cache + NETWORK-FIRST for static (cache as offline fallback) + per-pathname navigation cache; SW registration now gated to production builds in AppShell. Old poisoned caches auto-drop via activate cleanup. (Recovery during debugging: dev server had also died — restarted via python double-fork daemon; wiped .next once.)
+   170→- FEATURE — Daily check-in streak: User.checkinStreak/lastCheckin fields (db:push'd); /api/checkin GET status + POST claim (Tehran dateKey, yesterday-continuation streak, rewards 40/60/80/100/140/180/300, day-7 jackpot 👑 + sfx.achievement, rate-limit 6/h, analytics event, ALREADY-409 guard); HubView section with 7-day calendar (claimed ✓ green, next-day glowing amber, 👑 jackpot chip), 🔥 streak badge, guest lock card; cycle math correct for streak>7 (slot = ((n-1)%7)+1). Verified: claim → toast +۴۰, coins 10314→10354 exact, DB streak=1 + analytics row.
+   171→- FEATURE — Undo (take-back): GameScreen button (Undo2 icon); AI mode rewinds 2 plies (stays your turn), local 1 ply; replay-from-history rebuild, disabled while thinking/finished/online; browser-verified full rewind to empty board.
+   172→- FEATURE — Ghost drop preview + column tint (GameBoard): hovering a column shows a 40%-opacity piece of the side-to-move in the landing cell (animate-pop) + full-height vertical grass-gradient tint behind the column; verified on classic AND board_persia palettes.
+   173→- FEATURE — Live per-move stopwatch in scoreboard (replaces dead ۰:۰۰ label): MoveTimer remounts via key=ply, mm:ss localized digits, caps 99:59.
+   174→- FEATURE — Rating trend sparkline (ProfileView): reconstructs ELO history from p1/p2RatingDelta anchored at true current rating; amber recharts LineCard (hidden Y-axis, localized tooltip, min/max labels, ↗/↘ arrow); plain IIFE derivation (early guest return forbids hooks below it).
+   175→- FEATURE — 6 new store items (44 total): piece_firoozeh (Persian turquoise EPIC 1500), board_persia (Persian tilework LEGENDARY 2400), bg_aurora (EPIC 1500), fx_galaxy (EPIC 1800 pixels), avatar_homa (RARE 550), title_star (RARE 700 lvl4); fx_galaxy added to effectSkinVisual map; new idempotent sync script src/scripts/sync-items.ts (upserts catalog only — run after adding cosmetics).
+   176→- FIX — Achievement/showcase labels were raw English ids ("Blood"/"1"/"collector"): new achLabelById() builds localized labels from metric+goal via existing i18n keys (e.g. "۱ × برد", "۵ × 🛍") across grid/showcase/title badge.
+   177→- POLISH — Header coins pill now tween-counts on change (useCountUp, 650ms ease-out cubic); .card-shine hover sweep utility added + applied to store item cards & hub featured card; version 1.1 → 1.2.
+   178→- i18n: 11 new keys × 4 locales (checkin_title/desc/claim/day/next/done, guest_locked_checkin, undo, rating_trend); mobile 390px check-in calendar verified 7-in-row.
+   179→- Regression: online queue via socket OK (waiting state reached); rejoin log spam traced to a frozen stale test tab reconnect-looping (server TTL sweeps already destroy idle/finished rooms — no server change needed); stale browser sessions closed.
+   180→- Lint 0 errors (1 pre-existing font warning); tsc clean for project files; next:3000 / socket:3003 / gateway:81 all 200.
+   181→
+   182→Stage Summary:
+   183→- Round 3 complete: retention loop (check-in), UX depth (undo/ghost/timer), meta-progression visibility (sparkline), fresh cosmetics, dev-safe SW.
+   184→- Known minor: coins pill tween shows mixed-script digits mid-animation frame (cosmetic, settles instantly); ghost preview relies on hover (touch shows on touchstart).
+   185→- NEXT ideas: weekly leaderboard prizes, game replay viewer, friend rooms list, more quests pool, sound toggle for music loop, admin export CSV.
+   186→
+   187→---
+   188→Task ID: R5 (webDevReview round 5)
+   189→Agent: main (orchestrator)
+   190→Task: Status assessment + agent-browser QA sweep + bug fixes + lobby/queue UX features + localization polish
+   191→
+   192→Work Log:
+   193→- STATUS ASSESSMENT: found an unlogged post-R3 work round (files ~23:19-23:31) that shipped replay viewer (ReplayModal + /api/game/replay), Weekly Race (/api/leaderboard/weekly + claim flow), and admin CSV export (/api/admin/export wired in AdminView) — all verified working in browser this round.
+   194→- QA sweep via agent-browser (through gateway :81): hub (quests/announcements/check-in) ✓, play lobby ✓, AI game (drop + AI reply) ✓, store 6 tabs ✓, leaderboard + weekly race card ✓, profile (stats/sparkline/history) ✓, replay modal (play/step/speed controls) ✓, admin all 6 tabs + CSV export anchors ✓. Console clean; lint 0 errors; tsc clean for project files.
+   195→- BUG FIX 1 — PlayView: "در انتظار حریف…" spinner was rendered unconditionally in the online card (always spinning even when idle → looked stuck). Replaced with real state machine: searching (radar) / waiting-room (private) / idle (presence).
+   196→- BUG FIX 2 — HubView: quest counters showed English digits ("0/25") → now localizeDigits ("۰/۲۵").
+   197→- BUG FIX 3 — LeaderboardView: weekly countdown was hardcoded English "6d 20h" → now localized units+digits per locale ("۶ روز ۲۰ ساعت" / "6d 20h" / "٦ يوم ٢٠ ساعة" / "6g 20sa"); also removed forced dir=ltr garble risk.
+   198→- FEATURE — Matchmaking radar: animated triple ping-ring radar + Swords badge while queued; lobby (mode cards, board picker, online buttons) locks with disabled states during search; cancel button emits queue:leave + disconnect.
+   199→- FEATURE — Private-room waiting panel: creating a room now shows a dedicated panel with the big mono room code (click-to-copy + toast) instead of only a toast.
+   200→- FEATURE — Join-by-code Dialog replaces native prompt(): styled shadcn Dialog, LTR mono input, live validation /^[A-Z0-9]{4,6}$/ (join disabled until valid), inline invalid_code error, Enter submits, ROOM_NOT_FOUND server error mapped to localized toast.
+   201→- FEATURE — Live park presence: duel-socket health now reports players (io.eio.clientsCount) + live (unfinished) rooms; PlayView polls it every 15s via gateway (?XTransformPort=3003) and shows "N بازیکن آنلاین · M نبرد زنده" with pulsing green dot.
+   202→- i18n: 7 new keys × 4 locales (cnt_d/cnt_h/cnt_m, players_online, live_duels, join_code_hint, invalid_code, join_action). Version 1.2 → 1.3.
+   203→- OPS: killed 3 stale duplicate duel-socket processes; restarted single daemon (python double-fork) — health now {"ok":true,"rooms":0,"queued":0,"players":0}.
+   204→- E2E regression (2 players): admin queued via browser (radar visible, lobby locked) + simulated opponent (Node socket.io-client, polling transport + doi_session cookie — note: bun XHR breaks engine.io polling, ws transport drops extraHeaders; sim kept at tool-results/opp-sim.mjs) → match found → moves synced → opponent disconnected → server 60s grace → game resolved (sim had built a run) → defeat modal + rewards (+۱۲🪙 +۲۰✦ −۱۵ ELO) ✓. Join dialog invalid-code + not-found flows ✓. Mobile-safe dialog width ✓.
+   205→- Fixed react-compiler lint error during refactor: render-scope `cards` array captured a fn reading socketRef → moved socket cleanup out of startLocal, used disabled-state locking instead (no ref reads in render scope).
+   206→
+   207→Stage Summary:
+   208→- Round 5 complete: 3 localization/UX bugs fixed, matchmaking UX rebuilt (radar/cancel/waiting-room/join dialog), live presence indicator added, all 4 locales updated.
+   209→- Lint 0 errors (1 pre-existing font warning); tsc clean; next:3000 + socket:3003 + gateway:81 healthy; version 1.3.
+   210→- Known minor: presence "players" counts sockets incl. lobby browsers (not just in-game players); weekly race top-3 grid hidden if <1 player (empty-state copy exists).
+   211→- NEXT ideas: friend/favorites list + challenge-a-friend, in-game move-log strip, ambient music loop w/ toggle, weekly prizes auto-notify (toast on rollover), board editor for custom layouts, admin user-detail drawer (full profile + match history per user).
+   212→
+   213→---
+   214→Task ID: R6 (webDevReview round 6)
+   215→Agent: main (orchestrator)
+   216→Task: Status assessment + agent-browser QA sweep + 2 bug fixes + 3 new features + styling/a11y polish + submit-rule fix
+   217→
+   218→Work Log:
+   219→- STATUS: all services healthy (next:3000, gateway:81, duel-socket:3003); full QA sweep of hub/play/store/leaderboard/profile/admin — zero console errors
+   220→- BUG FIX 1 (socket) — rejoinIfNeeded re-attached players to FINISHED rooms kept for the 10-min rematch window → clients resurrected a dead game (stale board + old result modal) on reconnect/queue. Fix: if room.finished, drop the userRooms binding and return (mini-services/duel-socket/index.ts). Verified E2E: after an online game ends, clicking Ranked now queues fresh (radar) instead of resurrecting; queue counts correct.
+   221→- BUG FIX 2 (modal) — resign/timeout results rendered "چهار عدد پشت‌سرهم! ()" with empty parens. New perspective-aware winReasonText(type, viewerWon): local=neutral "تسلیم/پایان زمان"; ai/online=opponent-vs-you variants (resign_opp/resign_you/timeout_opp/timeout_you). 8 new i18n keys × 4 locales. Verified: resigner sees "شما تسلیم شدید", sim opponent got rewards.
+   222→- BUG FIX 3 (submit) — anti-farm rule `moves < 8` rejected LEGITIMATE P1 speed-wins (earliest possible win = ply 7, four own pieces). Lowered to `moves < 7` with explanatory comment (api/game/submit). Verified: scripted 7-ply local run-win (6,7,8,9) now submits 200 with rewards; identical replay correctly 409s DUPLICATE.
+   223→- UX FIX — native confirm() for resign replaced with styled AlertDialog (rtl-aware, rose confirm button); submit error toasts now map DUPLICATE → "این نبرد قبلاً ثبت شده است" and RATE → friendly retry message (2 new keys × 4 locales) instead of generic "خطا".
+   224→- FEATURE — Move log strip: compact auto-scrolling chip strip under the board (📜 گردش‌های نبرد) — one chip per ply, side-colored (amber/emerald) + side dot, latest chip ring-highlighted, localized digits, dir=ltr inner scroller so ply order is stable in RTL; works in all 3 modes (verified ai/local/online).
+   225→- FEATURE — Procedural ambient music (opt-in): WebAudio D-minor pad (detuned drone + breathing lowpass LFO + random-walk plucks w/ echo) in lib/sound.ts; initMusicPref/resumeMusicIfEnabled wired in AppShell first-gesture listener; header toggle (Music2/Music4 + pulsing dot) + profile settings Switch; persisted doi_music in localStorage.
+   226→- FEATURE — Admin user-detail sheet: GET /api/admin/users?userId= returns full profile + last 20 matches + purchases + report counts; UsersTab rows now clickable (username) + Eye menu item; Sheet (RTL-left) shows 9 stat cards, XP progress, bio, cosmetics chips (empty filtered), ban info, purchases, recent duels with mode badges / ✓✗= / endReason / ELO delta. Browser-verified on clean_two.
+   227→- POLISH (styling details) — game-over modal: floating medal emoji (🏆/🛡️/🤝) w/ glow, staggered animate-pop chips for winning numbers (replaces "()" parens), card-shine sweep; globals.css: amber :focus-visible ring for a11y, h1-h4 text-wrap balance, prefers-reduced-motion kills pop/shine/fireworks (.win-fireworks class added), royal-card transition micro-interaction.
+   228→- i18n: 12 new keys × 4 locales (win_resign/win_timeout neutrals, resign_opp/you, timeout_opp/you, move_log, music, e_duplicate, e_rate). Version 1.3 → 1.4.
+   229→- E2E regression (2 players): register sim_r6 via API → admin ranked queue (radar ✓) → match → moves synced both ways (move log shows opponent plies) → admin resign → BOTH modals correct (admin: شنا تسلیم شدید + rewards + achievement + Elo −14; sim: REWARDS +14 elo) → re-queue test proves fix #1. Socket service restarted cleanly (rooms/queued 0 after tests).
+   230→- Mobile 390px: move log fits, no horizontal overflow, controls wrap to 2 rows.
+   231→- NOTE: Read-tool display artifact showed GameScreen deps as "ode, ..." — hex dump (od -c) confirmed the file is correct `}, [mode, ...]);` — no action needed.
+   232→- Lint 0 errors (1 pre-existing font warning); tsc clean for project files; screenshots in tool-results/ (r6-movelog.png, r6-movelog2.png, r6-winmodal.png, r6-user-sheet.png, r6-mobile-movelog.png).
+   233→
+   234→Stage Summary:
+   235→- Round 6 complete: 3 real bugs fixed (stale-room resurrection, empty-parens modal, impossible-win rejection), 3 features shipped (move log, ambient music, admin user sheet), resign dialog modernized, richer game-over presentation, a11y polish.
+   236→- Known minor: dev-overlay "1 Issue" badge = the intentional 409 test record (dev-only); coins-pill mixed-script digits mid-tween (cosmetic, pre-existing); ghost preview is hover-based (touch shows on touchstart, pre-existing).
+   237→- NEXT ideas: friend list + challenge-a-friend, weekly prizes auto-notify toast, board editor for custom layouts, music track selection (2-3 procedural moods), admin user sheet → inline ban/unban actions, sound toggle for move-log clicks.
+   238→
+   239→---
+   240→Task ID: R7 (webDevReview round 7)
+   241→Agent: main (orchestrator)
+   242→Task: Status assessment + agent-browser QA sweep + friends/challenges feature + music moods + admin quick actions + robustness fixes
+   243→
+   244→Work Log:
+   245→- STATUS: all services healthy; full QA sweep (hub/play incl. live AI game/store 7 tabs/leaderboard/profile/admin 6 tabs) — zero console errors, zero dev.log errors. Only issue found: footer "© 2024" outdated → fixed to dynamic localized year. Verdict: stable → proceeded to feature work.
+   246→- FEATURE 1 — FRIENDS SYSTEM (headline): Prisma models FriendRequest (directed, unique from/to) + Friendship (stored BOTH directions for O(1) list queries) + db:push. New /api/friends: GET (friends w/ presence+level+rating+wins+lastSeen, incoming, outgoing), POST actions add/accept/decline/cancel/remove; validations: guest-locked, self-add, banned targets hidden (404), ALREADY/PENDING/LIMIT(50)/RATE(10 per 10min); mutual-add auto-accepts; bidirectional rows on accept (upsert, idempotent).
+   247→- FEATURE 2 — PRESENCE: duel-socket now tracks onlineUsers (userId → socketIds, multi-tab safe) + onlineInfo (profile snapshot at auth); new GET /presence (internal, consumed by /api/friends via 127.0.0.1:3003); health payload gained `online` count; `presence:hello` event registers lobby presence.
+   248→- FEATURE 3 — FRIEND DUELS (challenge-a-friend): socket flow challenge:send/accept/decline/cancel + 30s TTL expiry (challenge:expired); busy checks both directions (in active room / queued / duplicate pending); 2s anti-spam throttle; cap 200 pending; accepted challenge → createRoom casual (ranked:false, no ELO). Lobby socket owns the flow; on 'match' the socket is HANDED OFF to the game pipeline (handedOff flag prevents lobby-effect cleanup from disconnecting the room socket).
+   249→- FEATURE 4 — FriendsPanel UI (new component in online section of PlayView): add-by-username row (Enter/Enter-btn), incoming requests card (accept ✓ / decline ✗), outgoing pills (click to cancel), friends list (presence dot + glow avatar + آنلاین/آفلاین + ⭐level + 🏆rating + wins, scrollable max-h-64), challenge button (Swords; disabled offline/busy, waiting-state w/ Clock while pending), remove via AlertDialog, guest-locked card, empty state, online/total badge, manual refresh, 15s polling. Incoming-challenge Dialog: ping-ring avatar, challenger name/level/rating, depleting countdown bar (amber→rose), accept/decline; challenges received OUTSIDE the lobby are auto-declined (prevents accepting mid-duel on a socket already bound to a room).
+   250→- FEATURE 5 — MUSIC MOODS ×3 (all procedural WebAudio): night (existing D-minor pad), desert (soft-saw drone + bandpass wind-noise bed + sparse Hijaz plucks, long echo), battle (low drone + minor-second shimmer + dum/tak frame-drum pattern). setMusicMood persists doi_music_mood and crossfades via stop+start; header = toggle button + mood DropdownMenu (Moon/Sun/Drum icons, ✓ on active, off item); profile settings = MoodPicker pills (radiogroup a11y); picking a mood turns music ON if it was off.
+   251→- FEATURE 6 — ADMIN USER-SHEET QUICK ACTIONS: sheet now opens with an amber quick-actions card: inline grant-coins (numeric input + button, digits-only) + ban (opens existing BanDialog) / unban buttons; sheet self-reloads after actions; verified in DB (701→801 coins).
+   252→- BUG FIX 1 (robustness, E2E-discovered) — STUCK LIVE ROOMS: a game whose both sockets died half-open (headless tab/Gateway hiccup) stayed unfinished forever; per-player grace timers never fired because server-side socket.connected stayed true. New sweeper: every 60s, unfinished room + bothGone + idle > 2× grace (DISCONNECT_GRACE_MS*2, lastActivityAt tracked on start/move, `?? startedAt` guard for legacy rooms) → finishGame(draw) + logged. 
+   253→- BUG FIX 2 — game-socket reconnect: reconnectionAttempts 3 → 10 (delay 1.5s) + game-aware socket.io 'reconnect' handler re-emits queue:join ONLY while inLiveGame (cleared on result/game:over); server queue:join resumes an ACTIVE room via rejoinIfNeeded → seamless mid-game recovery; ranked socket also re-asserts after transient drops (fixes silent "queued but UI idle" mismatch).
+   254→- BUG FIX 3 — pickMood set UI state but not the engine (music stayed off) → setMusicEnabled(true) when picking a mood.
+   255→- BUG FIX 4 — challenge dialog was rendered only in the lobby JSX; receiving one on the game-over screen set invisible state → now auto-declined outside lobby via phaseRef (useEffect-updated, react-compiler clean).
+   256→- FIX — react-compiler lint errors: ref-write-during-render (phaseRef moved to effect), setState-in-effect (challenge countdown reworked to deadline-derived interval).
+   257→- FIX — socket service `io.eio` private access (pre-existing tsc error) cast safely; mini-service tsc now clean.
+   258→- POLISH — footer year dynamic (localizeDigits(new Date().getFullYear())), version 1.4 → 1.7; dev.log confirmed zero errors throughout.
+   259→- i18n: 33 new keys × 4 locales (friends/add/request/challenge/music-mood/quick-actions sets incl. error codes e_fr_*); type Dict guarantees all locales complete (tsc-verified).
+   260→- E2E REGRESSION (browser آریا_مهر + node socket.io-client sim_r7, tool-results/opp-sim-r7.mjs + chal-send.mjs + queue-sim2.mjs): add friend via UI → request appears for sim → accept via API → friendship bidirectional ✓; presence online/offline live via /presence ✓; challenge A→B: sim received + auto-accepted after 2s → BOTH in match ✓; moves synced both ways (move log chips) ✓; resign → styled dialog → both result modals + rewards (sim +72🪙 +80✦ achievement; casual → eloDelta null ✓). Reversed B→A: browser incoming dialog renders (rings/countdown/accept) → accepted → match ✓. Ranked queue: ELO-gap tolerance verified (418 gap needs widened tolerance; instant match was my own stale widened entry — tolerance widening working as designed) ✓. Admin quick actions (grant) ✓. AI mode ✓. Mobile 390px: online card stacks, friends row fits, no overflow ✓.
+   261→- OPS: dev server restarted cleanly (stale Prisma Client after `prisma generate` — Node require cache; schema-push requires a next restart; sessions survived, DB-backed). duel-socket service RESTARTED CLEANLY without --hot (`setsid nohup bun index.ts` → /tmp/duel-socket.log): bun --hot preserves module state across reloads making timer/state semantics unreliable (stale timers + legacy rooms) — avoid --hot for stateful services.
+   262→- Lint 0 errors (1 pre-existing font warning); tsc clean (src/ 0 errors, duel-socket clean); screenshots in tool-results/ (r7-friends-panel2, r7-friend-online, r7-incoming-dialog, r7-challenge-game, r7-final-duel, r7-mobile-friends, r7-sheet2, r7-final-panel).
+   263→
+   264→Stage Summary:
+   265→- Round 7 complete: social layer shipped (friends + live presence + challenge-a-friend duels both directions), 3 procedural music moods with UI pickers, admin quick actions, and two meaningful robustness fixes (stuck-room sweeper + mid-game reconnection) discovered through adversarial E2E testing.
+   266→- Known minor: friends badge "n/m" bidi rendering in RTL (cosmetic); presence counts lobby browsers (documented); sim scripts live in tool-results/ (QA-only).
+   267→- NEXT ideas: friend list on leaderboard rows (challenge inline), weekly-prize rollover toast, board editor for custom layouts, spectate live duels, friends "in duel" status (userRooms-aware presence), chat notification sound per message, admin sheet inline role change.
+   268→
+   269→---
+   270→Task ID: 5-a
+   271→Agent: orbit-navigator (GLM)
+   272→Task: Build "Orbit Odyssey" (ادیسهٔ مداری) — real-orbital-mechanics 12-mission campaign game (data + full canvas game)
+   273→
+   274→Work Log:
+   275→- Read worklog + verified platform contracts: arcade-client (`useArcadeFinish`), sfx set (win/bad/lose/drop/coin/click/achievement), custom CSS classes (royal-card/gold-text/glow-gold/nice-scroll/animate-pop), ArcadeView dynamic wiring with onExit, all required i18n keys present in fa/en/ar/tr (i18n file untouched).
+   276→- Found prior partial artifacts on disk (orbit-missions.ts + OrbitGame.tsx) with NO worklog entry → audited every line against the task spec instead of rewriting; fixed gaps, then validated everything empirically.
+   277→- src/lib/game/orbit-missions.ts — tuning constants documented at top (WORLD 1600×1200, DT 1/60, THRUST_ACCEL 42, FUEL_BURN 12/s, LAUNCH_SCALE 0.16, MAX_DRAG 240 → ≤38.4 u/s Δv, LAUNCH_FUEL_PER_DV 0.4, OOB_MARGIN 40%, PREDICT_STEPS 900, POD_PICKUP 26, plausible relative GMs: Sun 45000/Earth 9000/Moon 120/Mars 3800/Venus 7200/Jupiter 20000/Saturn 12000/Uranus 8000/Neptune 11000); 12 missions × 3 acts with bilingual name/briefing/hint, pods, generous capture rings; 5-card science CODEX (Gravity, Orbit insertion, Hohmann 1925, Gravity assist, Oberth 1929); pure physics module (accelAt = Σ GMᵢ(rᵢ−r)/|rᵢ−r|³ with Plummer softening, semi-implicit Euler stepProbe, hitsBody, outOfBounds, predictPath — same integrator for aim preview and flight).
+   278→- src/components/arcade/OrbitGame.tsx (1213 lines) — select → briefing → play screens; canvas: procedural 2-layer twinkle starfield, teal/violet/amber nebulae, vignette, radial-gradient spheres with rim light + rotating surface arcs, pulsing sun corona, ringed Saturn, probe triangle with engine flame + fading golden 120-pt trail, dotted fading prediction (amber→capture, red ✕→crash), pulsing hexagon pods, double dashed rotating target ring, off-screen probe arrow, particles + screen shake, low-fuel edge pulse; HUD chips (mission/fuel bar warns <20%/pods/timer/hints) throttled 150 ms; bottom Restart/Codex/Exit ≥44px; pointer-events aiming (drag→Δv w/ fuel cap, tiny-drag cancel) + mid-flight burn toward held pointer (fuel drains, fuel 0 ⇒ ballistic coast, no loss); 4:3 full-bleed canvas dir="ltr", wrappers dir-aware, localizeDigits everywhere.
+   279→- Economy: win → `void finish(score, { mission, pods, fuelLeft, outcome:'win' })` via useArcadeFinish('orbit'), own premium victory Dialog with score breakdown (100 + fuelLeft×2 + pods×100), rewards chips, next-mission flow; defeat dialog shows the mission's physics hint; progress persisted in localStorage 'doi_orbit_mission' + per-mission bests 'doi_orbit_best'.
+   280→- QA by simulation (tool-results/orbit-qa.mjs, bun): grid-searched 240 angles × 12 powers per mission with the EXACT flight integrator → ALL 12 MISSIONS BEATABLE (ballistic, capture ≤130 s, pods found along arcs). Placement sanity script (orbit-qa2.mjs): moved m11 pod#3 out of the capture ring (1240,330 → 1180,390) so it rewards the approach arc instead of being a free win-bonus.
+   281→- Spec compliance fixes: TIME_LIMIT 120 → 150 s (spec) in constant + doc header (sim confirmed all captures well under).
+   282→- Generated the missing game cover art public/art/orbit-cover.jpg (1344×768 JPEG, teal/gold orbital-tug art — ArcadeView referenced it and dev.log 500'd on it).
+   283→- Verification: `bunx tsc --noEmit | grep Orbit` → empty; `bun run lint | grep Orbit` → empty; curl / → 200; curl /art/orbit-cover.jpg → 200; no new dev.log errors from orbit files (remaining image 404s belong to other agents' assets).
+   284→
+   285→Stage Summary:
+   286→- Orbit Odyssey shipped: a peaceful, premium, REAL-astrodynamics puzzle campaign — 12 missions across 3 story acts ("Inner Worlds", "The Giants' Ladder", "The Silent Choir"; Year 2091, restoration tug Khorshid reawakens the silent Heliograph Array), Newtonian n-body gravity with semi-implicit Euler @60 Hz, live ballistic aim prediction, fuel-burned mid-flight steering, gravity-assist/Oberth missions that EMERGE from the simulation (no scripted paths), 0–3 science pods per mission, bilingual briefings + 5-card science Codex, economy via useArcadeFinish('orbit') (score ceiling respected server-side), localStorage campaign progress + bests.
+   287→- Files: src/lib/game/orbit-missions.ts, src/components/arcade/OrbitGame.tsx, public/art/orbit-cover.jpg (+ QA scripts tool-results/orbit-qa*.mjs).
+   288→- Beatability matrix (sim-verified ballistic solutions, angle°/Δv/time): m1 350°/9.6/83s · m2 38°/6.4/130s · m3 339°/28.8/41s · m4 36°/25.6/39s · m5 339°/32.0/37s · m6 0°/38.4/25s · m7 323°/38.4/29s · m8 20°/38.4/33s · m9 24°/16.0/66s · m10 347°/38.4/27s · m11 339°/35.2/30s · m12 325°/28.8/41s — all ≤150 s limit; mid-flight thrust gives players far more margin than the grid search.
+   289→- Deviations (deliberate): FUEL_BURN 12/s (spec said "e.g. 10"); aiming drag starts anywhere on canvas and thrust holds anywhere (more forgiving on touch than "from the probe", same Δv math); extra per-mission bests key 'doi_orbit_best'; m11 uses a fictional GM-26000 "Wanderer" rogue planet as the Oberth well (documented in-file); own victory modal used instead of shared ArcadeResultModal (spec-permitted, shows score breakdown + rewards + next-mission).
+   290→

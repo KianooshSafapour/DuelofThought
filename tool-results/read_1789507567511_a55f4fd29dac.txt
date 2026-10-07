@@ -1,0 +1,893 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * SynapseGame — سیناپس: dual n-back working-memory trainer with the
+     5→     5→ * 20-day "Mind Clinic" (کلینیک ذهن) story campaign.
+     6→     6→ *
+     7→     7→ * Science (stated honestly in the intro): dual n-back (Jaeggi et al., PNAS 2008)
+     8→     8→ * trains working memory; the adaptive rule keeps the player at their edge.
+     9→     9→ *
+    10→    10→ * Engine: a setTimeout trial chain lives in refs (no per-tick React state);
+    11→    11→ * HUD state updates once per trial (2.6 s cadence). Audio is a tiny local
+    12→    12→ * WebAudio graph (sine + soft octave harmonic, gain ≤ 0.14), unlocked lazily
+    13→    13→ * on the first user gesture. Economy contract: useArcadeFinish('synapse').
+    14→    14→ */
+    15→    15→import { useCallback, useEffect, useRef, useState } from 'react';
+    16→    16→import { AnimatePresence, motion } from 'framer-motion';
+    17→    17→import {
+    18→    18→  ArrowDown, ArrowUp, BookOpen, BrainCircuit, Check, Dumbbell, Eye, EyeOff, FlaskConical,
+    19→    19→  Grid3x3, Lock, Minus, Play, RotateCcw, Volume2, X,
+    20→    20→} from 'lucide-react';
+    21→    21→import { useApp } from '@/store/app';
+    22→    22→import { localizeDigits } from '@/lib/i18n';
+    23→    23→import { useArcadeFinish, ArcadeResultModal } from '@/lib/arcade-client';
+    24→    24→import { sfx } from '@/lib/sound';
+    25→    25→import { Badge } from '@/components/ui/badge';
+    26→    26→import { Button } from '@/components/ui/button';
+    27→    27→import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+    28→    28→import { Progress } from '@/components/ui/progress';
+    29→    29→import {
+    30→    30→  BASE_TRIALS, CHANNEL_POS, CHANNEL_SND, CONTINUE_BTN, CONTINUE_NOTE, FA_POINTS, GLYPH_TOGGLE,
+    31→    31→  HIT_POINTS, HOWTO_POS, HOWTO_SND, INTERLUDE_TITLE, LOCAL_SAVE_NOTE, MENU_BTN, POS_NAMES,
+    32→    32→  PRACTICE_BLURB, PRACTICE_TITLE, SCIENCE_NOTE, SESSION_BLOCKS, STAT_WORDS, STIM_MS,
+    33→    33→  SYNAPSE_ACTS, SYNAPSE_DAYS, SYNAPSE_LETTERS, SYNAPSE_TONES, TRIAL_MS, effectiveAcc, genBlock,
+    34→    34→  loadLastN, loadMaxDay, nextN, pick, saveLastN, saveMaxDay,
+    35→    35→  type SynapseDay,
+    36→    36→} from '@/lib/game/synapse-data';
+    37→    37→
+    38→    38→/* ------------------------------------------------------------------ */
+    39→    39→/* Types                                                               */
+    40→    40→/* ------------------------------------------------------------------ */
+    41→    41→
+    42→    42→type Phase = 'home' | 'countdown' | 'playing' | 'interlude' | 'results';
+    43→    43→type Channel = 'pos' | 'snd';
+    44→    44→type Fx = 'hit' | 'fa' | null;
+    45→    45→
+    46→    46→interface ChannelStats { hits: number; misses: number; fa: number; opps: number }
+    47→    47→interface BlockSummary { n: number; pos: ChannelStats; snd: ChannelStats; acc: number }
+    48→    48→interface Summary {
+    49→    49→  title: string;
+    50→    50→  blocks: BlockSummary[];
+    51→    51→  pos: ChannelStats;
+    52→    52→  snd: ChannelStats;
+    53→    53→  score: number;
+    54→    54→  accPct: number;
+    55→    55→}
+    56→    56→interface BriefItem {
+    57→    57→  mode: 'campaign' | 'practice';
+    58→    58→  day: number;
+    59→    59→  startN: number;
+    60→    60→  title: string;
+    61→    61→  note: string;
+    62→    62→  actTitle: string;
+    63→    63→}
+    64→    64→
+    65→    65→function emptyStats(): ChannelStats {
+    66→    66→  return { hits: 0, misses: 0, fa: 0, opps: 0 };
+    67→    67→}
+    68→    68→
+    69→    69→function sumStats(list: ChannelStats[]): ChannelStats {
+    70→    70→  return list.reduce(
+    71→    71→    (a, c) => ({ hits: a.hits + c.hits, misses: a.misses + c.misses, fa: a.fa + c.fa, opps: a.opps + c.opps }),
+    72→    72→    emptyStats(),
+    73→    73→  );
+    74→    74→}
+    75→    75→
+    76→    76→/* ------------------------------------------------------------------ */
+    77→    77→/* Local WebAudio graph (letter tones + feedback blips)                */
+    78→    78→/* ------------------------------------------------------------------ */
+    79→    79→
+    80→    80→let audioCtx: AudioContext | null = null;
+    81→    81→
+    82→    82→function ensureAudio(): AudioContext | null {
+    83→    83→  if (typeof window === 'undefined') return null;
+    84→    84→  if (!audioCtx) {
+    85→    85→    try {
+    86→    86→      audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    87→    87→    } catch {
+    88→    88→      return null;
+    89→    89→    }
+    90→    90→  }
+    91→    91→  if (audioCtx.state === 'suspended') void audioCtx.resume();
+    92→    92→  return audioCtx;
+    93→    93→}
+    94→    94→
+    95→    95→function releaseAudio() {
+    96→    96→  if (audioCtx) {
+    97→    97→    const c = audioCtx;
+    98→    98→    audioCtx = null;
+    99→    99→    void c.close().catch(() => undefined);
+   100→   100→  }
+   101→   101→}
+   102→   102→
+   103→   103→/** Letter tone: sine fundamental + soft octave harmonic, 350 ms gentle envelope, master gain 0.14. */
+   104→   104→function playLetter(idx: number, on: boolean) {
+   105→   105→  if (!on) return;
+   106→   106→  const ctx = ensureAudio();
+   107→   107→  if (!ctx) return;
+   108→   108→  const f = SYNAPSE_TONES[idx];
+   109→   109→  const t0 = ctx.currentTime;
+   110→   110→  const master = ctx.createGain();
+   111→   111→  master.gain.value = 0.14;
+   112→   112→  master.connect(ctx.destination);
+   113→   113→  const voice = (freq: number, vol: number) => {
+   114→   114→    const osc = ctx.createOscillator();
+   115→   115→    osc.type = 'sine';
+   116→   116→    osc.frequency.value = freq;
+   117→   117→    const g = ctx.createGain();
+   118→   118→    g.gain.setValueAtTime(0, t0);
+   119→   119→    g.gain.linearRampToValueAtTime(vol, t0 + 0.02);
+   120→   120→    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.35);
+   121→   121→    osc.connect(g).connect(master);
+   122→   122→    osc.start(t0);
+   123→   123→    osc.stop(t0 + 0.4);
+   124→   124→  };
+   125→   125→  voice(f, 1);
+   126→   126→  voice(f * 2, 0.25);
+   127→   127→}
+   128→   128→
+   129→   129→/** Tiny press-feedback blips (correct = bright tick, false alarm = low thud). */
+   130→   130→function playBlip(kind: 'good' | 'bad', on: boolean) {
+   131→   131→  if (!on) return;
+   132→   132→  const ctx = ensureAudio();
+   133→   133→  if (!ctx) return;
+   134→   134→  const t0 = ctx.currentTime;
+   135→   135→  const osc = ctx.createOscillator();
+   136→   136→  const g = ctx.createGain();
+   137→   137→  osc.type = 'sine';
+   138→   138→  osc.frequency.value = kind === 'good' ? 880 : 185;
+   139→   139→  g.gain.setValueAtTime(0, t0);
+   140→   140→  g.gain.linearRampToValueAtTime(kind === 'good' ? 0.07 : 0.06, t0 + 0.01);
+   141→   141→  g.gain.exponentialRampToValueAtTime(0.0001, t0 + (kind === 'good' ? 0.09 : 0.16));
+   142→   142→  osc.connect(g).connect(ctx.destination);
+   143→   143→  osc.start(t0);
+   144→   144→  osc.stop(t0 + 0.2);
+   145→   145→}
+   146→   146→
+   147→   147→/* ------------------------------------------------------------------ */
+   148→   148→/* Scoped styles (clinical violet/teal, breathing grid, trial ring)    */
+   149→   149→/* ------------------------------------------------------------------ */
+   150→   150→
+   151→   151→const SYN_CSS = `
+   152→   152→.syn-glass { background: linear-gradient(165deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02) 60%, rgba(0,0,0,0.12)); border: 1px solid rgba(255,255,255,0.10); box-shadow: 0 12px 44px rgba(0,0,0,0.38), inset 0 1px 0 rgba(255,255,255,0.06); backdrop-filter: blur(10px); }
+   153→   153→.syn-glow-soft { box-shadow: 0 0 16px rgba(192,132,252,0.35); }
+   154→   154→.syn-breathe { animation: synBreathe 5.6s ease-in-out infinite; }
+   155→   155→@keyframes synBreathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.014); } }
+   156→   156→.syn-tile { position: relative; border-radius: 1rem; background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.09); box-shadow: inset 0 2px 10px rgba(0,0,0,0.45), inset 0 -1px 0 rgba(255,255,255,0.04); transition: background 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+   157→   157→.syn-tile-on { background: radial-gradient(circle at 50% 45%, rgba(216,180,254,0.95) 0%, rgba(147,51,234,0.5) 42%, rgba(147,51,234,0.08) 75%); border-color: rgba(192,132,252,0.9); box-shadow: 0 0 26px rgba(192,132,252,0.55), 0 0 64px rgba(147,51,234,0.28), inset 0 0 18px rgba(192,132,252,0.4); }
+   158→   158→.syn-pulse { position: absolute; inset: -3px; border-radius: 1.15rem; border: 2px solid rgba(216,180,254,0.9); animation: synPulse 0.6s ease-out both; pointer-events: none; }
+   159→   159→@keyframes synPulse { 0% { transform: scale(0.92); opacity: 0.85; } 100% { transform: scale(1.22); opacity: 0; } }
+   160→   160→.syn-drain { animation-name: synDrain; animation-timing-function: linear; animation-fill-mode: forwards; }
+   161→   161→@keyframes synDrain { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 75.4; } }
+   162→   162→.syn-count { animation: synCount 0.6s ease-out both; }
+   163→   163→@keyframes synCount { 0% { transform: scale(1.7); opacity: 0; } 30% { opacity: 1; } 100% { transform: scale(1); opacity: 0.95; } }
+   164→   164→@media (prefers-reduced-motion: reduce) { .syn-breathe, .syn-pulse, .syn-drain, .syn-count { animation: none !important; } }
+   165→   165→`;
+   166→   166→
+   167→   167→/* ------------------------------------------------------------------ */
+   168→   168→/* Presentational helper: per-channel results card                     */
+   169→   169→/* ------------------------------------------------------------------ */
+   170→   170→
+   171→   171→function ChannelCard({ title, icon, tone, stats, labels }: {
+   172→   172→  title: string;
+   173→   173→  icon: React.ReactNode;
+   174→   174→  tone: 'teal' | 'violet';
+   175→   175→  stats: ChannelStats;
+   176→   176→  labels: { hits: string; misses: string; falseAlarms: string };
+   177→   177→}) {
+   178→   178→  const ring = tone === 'teal' ? 'border-teal-400/25' : 'border-violet-400/25';
+   179→   179→  const text = tone === 'teal' ? 'text-teal-200' : 'text-violet-200';
+   180→   180→  const row = (label: string, value: number, iconEl: React.ReactNode, cls: string) => (
+   181→   181→    <li className="flex items-center justify-between">
+   182→   182→      <span className="flex items-center gap-1.5">
+   183→   183→        {iconEl}
+   184→   184→        {label}
+   185→   185→      </span>
+   186→   186→      <b className={cls}>{value}</b>
+   187→   187→    </li>
+   188→   188→  );
+   189→   189→  return (
+   190→   190→    <div className={`rounded-2xl border ${ring} bg-white/[0.03] p-3`}>
+   191→   191→      <p className={`flex items-center gap-1.5 text-[11px] font-black ${text}`}>{icon}{title}</p>
+   192→   192→      <ul className="mt-2 space-y-1.5 text-[11px] text-white/70">
+   193→   193→        {row(labels.hits, stats.hits, <Check className="h-3 w-3 text-teal-300" />, 'text-teal-200')}
+   194→   194→        {row(labels.misses, stats.misses, <Minus className="h-3 w-3 text-amber-300" />, 'text-amber-200')}
+   195→   195→        {row(labels.falseAlarms, stats.fa, <X className="h-3 w-3 text-rose-300" />, 'text-rose-200')}
+   196→   196→      </ul>
+   197→   197→    </div>
+   198→   198→  );
+   199→   199→}
+   200→   200→
+   201→   201→/* ------------------------------------------------------------------ */
+   202→   202→/* Main component                                                      */
+   203→   203→/* ------------------------------------------------------------------ */
+   204→   204→
+   205→   205→export function SynapseGame({ onExit }: { onExit: () => void }) {
+   206→   206→  const { t, locale, user } = useApp();
+   207→   207→  const { finish, rewards, open, close } = useArcadeFinish('synapse');
+   208→   208→  const isRtl = locale === 'fa' || locale === 'ar';
+   209→   209→  const loc = useCallback((v: string | number) => localizeDigits(v, locale), [locale]);
+   210→   210→  const pctSign = locale === 'fa' ? '٪' : '%';
+   211→   211→
+   212→   212→  /* ---------- persistent/local UI state ---------- */
+   213→   213→  const [maxDay, setMaxDay] = useState(0);
+   214→   214→  const [phase, setPhase] = useState<Phase>('home');
+   215→   215→  const [brief, setBrief] = useState<BriefItem | null>(null);
+   216→   216→  const [showGlyph, setShowGlyph] = useState(true);
+   217→   217→  const [count, setCount] = useState(3);
+   218→   218→  const [session, setSession] = useState<{ mode: 'campaign' | 'practice'; day: number; title: string } | null>(null);
+   219→   219→
+   220→   220→  /* ---------- live HUD state (updated once per trial, never per tick) ---------- */
+   221→   221→  const [activeCell, setActiveCell] = useState<number | null>(null);
+   222→   222→  const [glyph, setGlyph] = useState<string | null>(null);
+   223→   223→  const [trialIdx, setTrialIdx] = useState(-1);
+   224→   224→  const [nBack, setNBack] = useState(2);
+   225→   225→  const [blockNum, setBlockNum] = useState(1);
+   226→   226→  const [score, setScore] = useState(0);
+   227→   227→  const [fx, setFxState] = useState<{ pos: Fx; snd: Fx }>({ pos: null, snd: null });
+   228→   228→  const [interlude, setInterlude] = useState<{ block: number; prevN: number; nextNV: number; acc: number; hits: number; fas: number } | null>(null);
+   229→   229→  const [summary, setSummary] = useState<Summary | null>(null);
+   230→   230→
+   231→   231→  /* ---------- engine refs (never touched during render) ---------- */
+   232→   232→  const timersRef = useRef<number[]>([]);
+   233→   233→  const phaseRef = useRef<Phase>('home');
+   234→   234→  const nRef = useRef(2);
+   235→   235→  const trialRef = useRef(-1);
+   236→   236→  const blockNumRef = useRef(1);
+   237→   237→  const seqRef = useRef<{ pos: number[]; snd: number[] }>({ pos: [], snd: [] });
+   238→   238→  const respRef = useRef<{ pos: boolean; snd: boolean }>({ pos: false, snd: false });
+   239→   239→  const statsRef = useRef<{ pos: ChannelStats; snd: ChannelStats }>({ pos: emptyStats(), snd: emptyStats() });
+   240→   240→  const sessionRef = useRef<{ mode: 'campaign' | 'practice'; day: number; title: string; startN: number; points: number; blocks: BlockSummary[] }>({
+   241→   241→    mode: 'practice', day: 0, title: '', startN: 2, points: 0, blocks: [],
+   242→   242→  });
+   243→   243→  const soundRef = useRef(true);
+   244→   244→  const pressRef = useRef<(ch: Channel) => void>(() => undefined);
+   245→   245→
+   246→   246→  const go = useCallback((p: Phase) => {
+   247→   247→    phaseRef.current = p;
+   248→   248→    setPhase(p);
+   249→   249→  }, []);
+   250→   250→
+   251→   251→  /* ---------- timer plumbing ---------- */
+   252→   252→  const clearTimers = useCallback(() => {
+   253→   253→    for (const id of timersRef.current) window.clearTimeout(id);
+   254→   254→    timersRef.current = [];
+   255→   255→  }, []);
+   256→   256→
+   257→   257→  const later = (fn: () => void, ms: number) => {
+   258→   258→    const id = window.setTimeout(fn, ms);
+   259→   259→    timersRef.current.push(id);
+   260→   260→  };
+   261→   261→
+   262→   262→  const setFx = useCallback((ch: Channel, kind: Fx) => {
+   263→   263→    setFxState((prev) => ({ ...prev, [ch]: kind }));
+   264→   264→    const id = window.setTimeout(() => setFxState((prev) => ({ ...prev, [ch]: null })), 420);
+   265→   265→    timersRef.current.push(id);
+   266→   266→  }, []);
+   267→   267→
+   268→   268→  /* ---------- response evaluation (independent channels) ---------- */
+   269→   269→  const press = useCallback((ch: Channel) => {
+   270→   270→    if (phaseRef.current !== 'playing') return;
+   271→   271→    const i = trialRef.current;
+   272→   272→    const n = nRef.current;
+   273→   273→    if (i < n) return; // warm-up trials have no n-back comparison yet — ignore early presses
+   274→   274→    if (respRef.current[ch]) return; // one response per channel per window
+   275→   275→    respRef.current[ch] = true;
+   276→   276→    const seq = seqRef.current;
+   277→   277→    const isMatch = ch === 'pos' ? seq.pos[i] === seq.pos[i - n] : seq.snd[i] === seq.snd[i - n];
+   278→   278→    const st = statsRef.current[ch];
+   279→   279→    if (isMatch) {
+   280→   280→      st.hits++;
+   281→   281→      sessionRef.current.points += HIT_POINTS * n;
+   282→   282→      playBlip('good', soundRef.current);
+   283→   283→      setFx(ch, 'hit');
+   284→   284→    } else {
+   285→   285→      st.fa++;
+   286→   286→      sessionRef.current.points -= FA_POINTS * n;
+   287→   287→      playBlip('bad', soundRef.current);
+   288→   288→      setFx(ch, 'fa');
+   289→   289→    }
+   290→   290→    setScore(Math.max(0, sessionRef.current.points));
+   291→   291→  }, [setFx]);
+   292→   292→
+   293→   293→  useEffect(() => { pressRef.current = press; }, [press]);
+   294→   294→
+   295→   295→  /* keyboard: A = position match, L = sound match (layout-independent via e.code) */
+   296→   296→  useEffect(() => {
+   297→   297→    const onKey = (e: KeyboardEvent) => {
+   298→   298→      if (e.repeat) return;
+   299→   299→      if (phaseRef.current !== 'playing') return;
+   300→   300→      if (e.code === 'KeyA') {
+   301→   301→        e.preventDefault();
+   302→   302→        pressRef.current('pos');
+   303→   303→      } else if (e.code === 'KeyL') {
+   304→   304→        e.preventDefault();
+   305→   305→        pressRef.current('snd');
+   306→   306→      }
+   307→   307→    };
+   308→   308→    window.addEventListener('keydown', onKey);
+   309→   309→    return () => window.removeEventListener('keydown', onKey);
+   310→   310→  }, []);
+   311→   311→
+   312→   312→  /* unmount: kill every timer + close the audio graph */
+   313→   313→  useEffect(() => {
+   314→   314→    return () => {
+   315→   315→      for (const id of timersRef.current) window.clearTimeout(id);
+   316→   316→      timersRef.current = [];
+   317→   317→      releaseAudio();
+   318→   318→    };
+   319→   319→  }, []);
+   320→   320→
+   321→   321→  /* campaign progress from localStorage (deferred: avoids sync setState-in-effect + SSR mismatch) */
+   322→   322→  useEffect(() => {
+   323→   323→    const id = window.setTimeout(() => setMaxDay(loadMaxDay()), 0);
+   324→   324→    return () => window.clearTimeout(id);
+   325→   325→  }, []);
+   326→   326→
+   327→   327→  /* ---------- trial engine ---------- */
+   328→   328→
+   329→   329→  /** Window for trial i has ended: register misses on the opportunities. */
+   330→   330→  const commitTrial = (i: number) => {
+   331→   331→    if (i < 0) return;
+   332→   332→    const n = nRef.current;
+   333→   333→    if (i < n) return; // warm-up trials carry no opportunities
+   334→   334→    const st = statsRef.current;
+   335→   335→    const seq = seqRef.current;
+   336→   336→    if (seq.pos[i] === seq.pos[i - n] && !respRef.current.pos) st.pos.misses++;
+   337→   337→    if (seq.snd[i] === seq.snd[i - n] && !respRef.current.snd) st.snd.misses++;
+   338→   338→  };
+   339→   339→
+   340→   340→  const finishSession = () => {
+   341→   341→    const s = sessionRef.current;
+   342→   342→    const pos = sumStats(s.blocks.map((b) => b.pos));
+   343→   343→    const snd = sumStats(s.blocks.map((b) => b.snd));
+   344→   344→    const hits = pos.hits + snd.hits;
+   345→   345→    const opps = pos.opps + snd.opps;
+   346→   346→    const fas = pos.fa + snd.fa;
+   347→   347→    const misses = pos.misses + snd.misses;
+   348→   348→    const finalScore = Math.max(0, s.points);
+   349→   349→    const accPct = opps > 0 ? Math.round((hits / opps) * 100) : 0;
+   350→   350→    setScore(finalScore);
+   351→   351→    setSummary({ title: s.title, blocks: [...s.blocks], pos, snd, score: finalScore, accPct });
+   352→   352→    if (s.mode === 'campaign' && s.day > 0) {
+   353→   353→      const prev = loadMaxDay();
+   354→   354→      if (s.day > prev) {
+   355→   355→        saveMaxDay(s.day);
+   356→   356→        setMaxDay(s.day);
+   357→   357→      }
+   358→   358→    }
+   359→   359→    go('results');
+   360→   360→    // Economy contract — guests fail gracefully; local results still shown.
+   361→   361→    void finish(finalScore, {
+   362→   362→      day: s.mode === 'campaign' ? s.day : 0,
+   363→   363→      n: s.blocks.length > 0 ? s.blocks[s.blocks.length - 1].n : s.startN,
+   364→   364→      hits,
+   365→   365→      misses,
+   366→   366→      falseAlarms: fas,
+   367→   367→      accuracy: accPct,
+   368→   368→    });
+   369→   369→  };
+   370→   370→
+   371→   371→  const endBlock = () => {
+   372→   372→    const n = nRef.current;
+   373→   373→    const st = statsRef.current;
+   374→   374→    const hits = st.pos.hits + st.snd.hits;
+   375→   375→    const opps = st.pos.opps + st.snd.opps;
+   376→   376→    const fas = st.pos.fa + st.snd.fa;
+   377→   377→    const acc = effectiveAcc(hits, fas, opps);
+   378→   378→    sessionRef.current.blocks.push({ n, pos: { ...st.pos }, snd: { ...st.snd }, acc });
+   379→   379→    saveLastN(n);
+   380→   380→    if (blockNumRef.current < SESSION_BLOCKS) {
+   381→   381→      const nn = nextN(n, acc);
+   382→   382→      setInterlude({ block: blockNumRef.current, prevN: n, nextNV: nn, acc, hits, fas });
+   383→   383→      nRef.current = nn;
+   384→   384→      setNBack(nn);
+   385→   385→      go('interlude');
+   386→   386→      later(() => {
+   387→   387→        if (phaseRef.current === 'interlude') startBlock(2);
+   388→   388→      }, 5200);
+   389→   389→    } else {
+   390→   390→      finishSession();
+   391→   391→    }
+   392→   392→  };
+   393→   393→
+   394→   394→  const runTrial = (i: number, blockLen: number) => {
+   395→   395→    commitTrial(i - 1);
+   396→   396→    if (i >= blockLen) {
+   397→   397→      endBlock();
+   398→   398→      return;
+   399→   399→    }
+   400→   400→    trialRef.current = i;
+   401→   401→    respRef.current = { pos: false, snd: false };
+   402→   402→    setTrialIdx(i);
+   403→   403→    const cell = seqRef.current.pos[i];
+   404→   404→    const tone = seqRef.current.snd[i];
+   405→   405→    setActiveCell(cell);
+   406→   406→    setGlyph(SYNAPSE_LETTERS[tone]);
+   407→   407→    playLetter(tone, soundRef.current);
+   408→   408→    later(() => {
+   409→   409→      setActiveCell(null);
+   410→   410→      setGlyph(null);
+   411→   411→    }, STIM_MS);
+   412→   412→    later(() => runTrial(i + 1, blockLen), TRIAL_MS);
+   413→   413→  };
+   414→   414→
+   415→   415→  const startBlock = (num: 1 | 2) => {
+   416→   416→    if (phaseRef.current === 'playing') return; // guard: ignore double-activation (button spam / pending auto-continue)
+   417→   417→    const n = nRef.current;
+   418→   418→    const seq = genBlock(n);
+   419→   419→    seqRef.current = { pos: seq.pos, snd: seq.snd };
+   420→   420→    statsRef.current = {
+   421→   421→      pos: { hits: 0, misses: 0, fa: 0, opps: seq.opps.pos },
+   422→   422→      snd: { hits: 0, misses: 0, fa: 0, opps: seq.opps.snd },
+   423→   423→    };
+   424→   424→    blockNumRef.current = num;
+   425→   425→    trialRef.current = -1;
+   426→   426→    respRef.current = { pos: false, snd: false };
+   427→   427→    setBlockNum(num);
+   428→   428→    setTrialIdx(-1);
+   429→   429→    setFxState({ pos: null, snd: null });
+   430→   430→    go('playing');
+   431→   431→    later(() => runTrial(0, BASE_TRIALS + n), 900);
+   432→   432→  };
+   433→   433→
+   434→   434→  /* ---------- session lifecycle ---------- */
+   435→   435→
+   436→   436→  const startSession = (mode: 'campaign' | 'practice', day: number, startN: number, title: string) => {
+   437→   437→    if (phaseRef.current === 'countdown' || phaseRef.current === 'playing' || phaseRef.current === 'interlude') return; // guard: session already live
+   438→   438→    ensureAudio(); // first user gesture — unlock WebAudio for the tones
+   439→   439→    soundRef.current = user?.soundOn ?? true;
+   440→   440→    sessionRef.current = { mode, day, title, startN, points: 0, blocks: [] };
+   441→   441→    nRef.current = mode === 'campaign' ? startN : loadLastN();
+   442→   442→    setSession({ mode, day, title });
+   443→   443→    setNBack(nRef.current);
+   444→   444→    setScore(0);
+   445→   445→    setSummary(null);
+   446→   446→    setInterlude(null);
+   447→   447→    setTrialIdx(-1);
+   448→   448→    setActiveCell(null);
+   449→   449→    setGlyph(null);
+   450→   450→    setCount(3);
+   451→   451→    go('countdown');
+   452→   452→    sfx.click();
+   453→   453→    later(() => { setCount(2); sfx.click(); }, 700);
+   454→   454→    later(() => { setCount(1); sfx.click(); }, 1400);
+   455→   455→    later(() => startBlock(1), 2100);
+   456→   456→  };
+   457→   457→
+   458→   458→  const openDay = (d: SynapseDay) => {
+   459→   459→    const act = SYNAPSE_ACTS.find((a) => a.act === d.act);
+   460→   460→    setBrief({
+   461→   461→      mode: 'campaign',
+   462→   462→      day: d.day,
+   463→   463→      startN: d.startN,
+   464→   464→      title: pick(d.title, locale),
+   465→   465→      note: pick(d.note, locale),
+   466→   466→      actTitle: act ? `${pick(act.title, locale)} · ${pick(act.range, locale)}` : '',
+   467→   467→    });
+   468→   468→  };
+   469→   469→
+   470→   470→  const openPractice = () => {
+   471→   471→    setBrief({
+   472→   472→      mode: 'practice',
+   473→   473→      day: 0,
+   474→   474→      startN: loadLastN(),
+   475→   475→      title: pick(PRACTICE_TITLE, locale),
+   476→   476→      note: pick(PRACTICE_BLURB, locale),
+   477→   477→      actTitle: locale === 'fa' ? 'خارج از برنامهٔ ۲۰ روزه' : 'Outside the 20-day program',
+   478→   478→    });
+   479→   479→  };
+   480→   480→
+   481→   481→  const playAgain = () => {
+   482→   482→    const s = sessionRef.current;
+   483→   483→    startSession(s.mode, s.day, s.startN, s.title);
+   484→   484→  };
+   485→   485→
+   486→   486→  const exitAll = () => {
+   487→   487→    clearTimers();
+   488→   488→    onExit();
+   489→   489→  };
+   490→   490→
+   491→   491→  const blockLen = BASE_TRIALS + nBack;
+   492→   492→  const trialShown = Math.min(Math.max(trialIdx + 1, 0), blockLen);
+   493→   493→
+   494→   494→  return (
+   495→   495→    <div className="relative min-h-[100dvh] overflow-x-hidden" dir={isRtl ? 'rtl' : 'ltr'}>
+   496→   496→      <style>{SYN_CSS}</style>
+   497→   497→      {/* clinical ambience: violet + teal radial washes */}
+   498→   498→      <div
+   499→   499→        aria-hidden="true"
+   500→   500→        className="pointer-events-none absolute inset-0"
+   501→   501→        style={{ background: 'radial-gradient(900px 480px at 18% -5%, rgba(147,51,234,0.16), transparent 60%), radial-gradient(820px 520px at 88% 105%, rgba(20,184,166,0.12), transparent 60%)' }}
+   502→   502→      />
+   503→   503→
+   504→   504→      <div className="relative mx-auto w-full max-w-md px-3 pb-10 pt-3 sm:max-w-lg">
+   505→   505→        <AnimatePresence mode="wait">
+   506→   506→          {/* ============================== HOME / CLINIC MENU ============================== */}
+   507→   507→          {phase === 'home' && (
+   508→   508→            <motion.div key="home" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }} transition={{ duration: 0.25 }} className="space-y-4">
+   509→   509→              <header className="flex items-center gap-2">
+   510→   510→                <Button variant="ghost" size="icon" className="h-10 w-10 rounded-xl border border-white/10 bg-white/5" onClick={exitAll} aria-label={t('back_park')}>
+   511→   511→                  <X className="h-5 w-5" />
+   512→   512→                </Button>
+   513→   513→                <div className="flex items-center gap-2">
+   514→   514→                  <BrainCircuit className="h-7 w-7 text-violet-300" />
+   515→   515→                  <div>
+   516→   516→                    <h1 className="text-xl font-black leading-tight text-violet-100">{t('game_synapse')}</h1>
+   517→   517→                    <p className="text-[11px] text-muted-foreground">{t('game_synapse_tag')}</p>
+   518→   518→                  </div>
+   519→   519→                </div>
+   520→   520→              </header>
+   521→   521→
+   522→   522→              <section className="syn-glass rounded-3xl p-5 text-center" aria-label={t('game_synapse_desc')}>
+   523→   523→                <p className="mx-auto max-w-sm text-xs leading-relaxed text-white/70">{t('game_synapse_desc')}</p>
+   524→   524→                <div className="mt-3 flex flex-col items-center gap-2">
+   525→   525→                  <span className="inline-flex items-center gap-1.5 rounded-full border border-teal-400/30 bg-teal-500/10 px-3 py-1 text-[10px] font-bold tracking-wide text-teal-200" dir="ltr">
+   526→   526→                    <FlaskConical className="h-3 w-3" /> Jaeggi et al. 2008 · PNAS
+   527→   527→                  </span>
+   528→   528→                  <p className="max-w-sm text-[11px] leading-relaxed text-white/50">{pick(SCIENCE_NOTE, locale)}</p>
+   529→   529→                </div>
+   530→   530→              </section>
+   531→   531→
+   532→   532→              <section className="syn-glass rounded-3xl p-4" aria-label={t('campaign')}>
+   533→   533→                <div className="mb-3 flex items-center justify-between">
+   534→   534→                  <h2 className="flex items-center gap-2 text-sm font-black text-white/90">
+   535→   535→                    <BookOpen className="h-4 w-4 text-amber-300" /> {t('campaign')}
+   536→   536→                  </h2>
+   537→   537→                  <Badge className="border-white/15 bg-white/5 text-white/70" dir="ltr">{loc(maxDay)} / {loc(20)}</Badge>
+   538→   538→                </div>
+   539→   539→
+   540→   540→                {/* act legend */}
+   541→   541→                <div className="mb-3 grid grid-cols-3 gap-1.5 text-center">
+   542→   542→                  {SYNAPSE_ACTS.map((a) => {
+   543→   543→                    const need = a.act === 3 ? 20 : a.act * 7;
+   544→   544→                    const complete = maxDay >= need;
+   545→   545→                    return (
+   546→   546→                      <div key={a.act} className={`rounded-xl border px-1.5 py-1.5 ${complete ? 'border-teal-400/30 bg-teal-500/10' : 'border-white/10 bg-white/[0.03]'}`}>
+   547→   547→                        <div className={`text-[11px] font-black ${complete ? 'text-teal-200' : 'text-white/80'}`}>{pick(a.title, locale)}</div>
+   548→   548→                        <div className="text-[9px] text-white/45">{pick(a.range, locale)}</div>
+   549→   549→                      </div>
+   550→   550→                    );
+   551→   551→                  })}
+   552→   552→                </div>
+   553→   553→
+   554→   554→                {/* 20 day cards + practice card (7 per row) */}
+   555→   555→                <div className="grid grid-cols-7 gap-1.5" role="list" aria-label={t('synapse_day')}>
+   556→   556→                  {SYNAPSE_DAYS.map((d) => {
+   557→   557→                    const locked = d.day > maxDay + 1;
+   558→   558→                    const done = d.day <= maxDay;
+   559→   559→                    const current = d.day === maxDay + 1;
+   560→   560→                    return (
+   561→   561→                      <button
+   562→   562→                        key={d.day}
+   563→   563→                        type="button"
+   564→   564→                        role="listitem"
+   565→   565→                        disabled={locked}
+   566→   566→                        onClick={() => { sfx.click(); openDay(d); }}
+   567→   567→                        aria-label={`${t('synapse_day')} ${d.day}${locked ? ' 🔒' : ''}`}
+   568→   568→                        className={[
+   569→   569→                          'pressable relative flex aspect-square items-center justify-center rounded-xl border text-sm font-black transition',
+   570→   570→                          locked
+   571→   571→                            ? 'cursor-not-allowed border-white/5 bg-white/[0.02] text-white/25'
+   572→   572→                            : done
+   573→   573→                              ? 'border-teal-400/30 bg-teal-500/10 text-teal-200'
+   574→   574→                              : current
+   575→   575→                                ? 'border-violet-400/60 bg-violet-500/15 text-violet-100 syn-glow-soft'
+   576→   576→                                : 'border-white/10 bg-white/[0.04] text-white/70 hover:border-violet-400/40',
+   577→   577→                        ].join(' ')}
+   578→   578→                      >
+   579→   579→                        {loc(d.day)}
+   580→   580→                        {done && <Check className="absolute end-0.5 top-0.5 h-3 w-3 text-teal-300" />}
+   581→   581→                        {locked && <Lock className="absolute end-0.5 top-0.5 h-2.5 w-2.5 text-white/30" />}
+   582→   582→                      </button>
+   583→   583→                    );
+   584→   584→                  })}
+   585→   585→                  <button
+   586→   586→                    type="button"
+   587→   587→                    role="listitem"
+   588→   588→                    onClick={() => { sfx.click(); openPractice(); }}
+   589→   589→                    aria-label={pick(PRACTICE_TITLE, locale)}
+   590→   590→                    className="pressable flex aspect-square items-center justify-center rounded-xl border border-dashed border-teal-400/40 bg-teal-500/[0.07] text-teal-300 transition hover:bg-teal-500/15"
+   591→   591→                  >
+   592→   592→                    <Dumbbell className="h-4 w-4" />
+   593→   593→                  </button>
+   594→   594→                </div>
+   595→   595→
+   596→   596→                {/* protocol legend */}
+   597→   597→                <div className="mt-3 space-y-1.5 rounded-2xl border border-white/10 bg-black/20 p-3">
+   598→   598→                  <p className="flex items-start gap-2 text-[11px] leading-relaxed text-white/70">
+   599→   599→                    <Grid3x3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-300" /> {pick(HOWTO_POS, locale)}
+   600→   600→                  </p>
+   601→   601→                  <p className="flex items-start gap-2 text-[11px] leading-relaxed text-white/70">
+   602→   602→                    <Volume2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-300" /> {pick(HOWTO_SND, locale)}
+   603→   603→                  </p>
+   604→   604→                </div>
+   605→   605→              </section>
+   606→   606→            </motion.div>
+   607→   607→          )}
+   608→   608→
+   609→   609→          {/* ============================== COUNTDOWN ============================== */}
+   610→   610→          {phase === 'countdown' && (
+   611→   611→            <motion.div key="countdown" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="flex min-h-[78dvh] flex-col items-center justify-center gap-6">
+   612→   612→              {session && (
+   613→   613→                <Badge className="border-white/10 bg-white/5 px-3 py-1 text-white/70">
+   614→   614→                  {session.mode === 'campaign' ? (
+   615→   615→                    <span className="flex items-center gap-1.5"><BookOpen className="h-3 w-3" />{t('synapse_day')} {loc(session.day)} · {session.title}</span>
+   616→   616→                  ) : (
+   617→   617→                    <span className="flex items-center gap-1.5"><Dumbbell className="h-3 w-3" />{pick(PRACTICE_TITLE, locale)}</span>
+   618→   618→                  )}
+   619→   619→                </Badge>
+   620→   620→              )}
+   621→   621→              <div key={count} className="syn-count select-none font-black text-violet-200 text-7xl" dir="ltr">{loc(count)}</div>
+   622→   622→              <Badge className="border-violet-400/40 bg-violet-500/15 px-3 py-1.5 text-sm text-violet-200">
+   623→   623→                <span dir="ltr">n = {loc(nBack)}</span>
+   624→   624→              </Badge>
+   625→   625→              <p className="text-[11px] text-white/40" dir="ltr">{t('synapse_trial')}: {loc(blockLen)} × {SESSION_BLOCKS}</p>
+   626→   626→            </motion.div>
+   627→   627→          )}
+   628→   628→
+   629→   629→          {/* ============================== PLAYING ============================== */}
+   630→   630→          {phase === 'playing' && (
+   631→   631→            <motion.div key="playing" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }} className="space-y-3">
+   632→   632→              {/* HUD */}
+   633→   633→              <header className="flex items-center gap-1.5">
+   634→   634→                <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 rounded-xl border border-white/10 bg-white/5" onClick={exitAll} aria-label={t('back_park')}>
+   635→   635→                  <X className="h-4 w-4" />
+   636→   636→                </Button>
+   637→   637→                {session?.mode === 'campaign' ? (
+   638→   638→                  <Badge className="border-white/10 bg-white/5 text-[10px] text-white/70">
+   639→   639→                    <BookOpen className="me-1 h-3 w-3" />{t('synapse_day')} {loc(session.day)}
+   640→   640→                  </Badge>
+   641→   641→                ) : (
+   642→   642→                  <Badge className="border-white/10 bg-white/5 text-[10px] text-white/70">
+   643→   643→                    <Dumbbell className="me-1 h-3 w-3" />{pick(PRACTICE_TITLE, locale)}
+   644→   644→                  </Badge>
+   645→   645→                )}
+   646→   646→                <Badge className="border-violet-400/40 bg-violet-500/15 text-[10px] text-violet-200">
+   647→   647→                  <span dir="ltr">n = {loc(nBack)}</span>
+   648→   648→                </Badge>
+   649→   649→                <Badge className="ms-auto border-amber-400/30 bg-amber-500/10 text-[10px] text-amber-300">
+   650→   650→                  {t('score')} {loc(score)}
+   651→   651→                </Badge>
+   652→   652→              </header>
+   653→   653→
+   654→   654→              {/* block progress + trial countdown ring */}
+   655→   655→              <div className="flex items-center gap-2">
+   656→   656→                <span className="sr-only">{t('synapse_trial')}</span>
+   657→   657→                <span className="min-w-14 text-[11px] font-bold text-white/60" dir="ltr">{loc(trialShown)} / {loc(blockLen)}</span>
+   658→   658→                <Progress
+   659→   659→                  value={(trialShown / blockLen) * 100}
+   660→   660→                  className="h-2 flex-1 bg-white/10 [&>[data-slot=progress-indicator]]:bg-gradient-to-r [&>[data-slot=progress-indicator]]:from-teal-400 [&>[data-slot=progress-indicator]]:to-violet-400"
+   661→   661→                  aria-label={t('synapse_trial')}
+   662→   662→                />
+   663→   663→                <svg viewBox="0 0 28 28" className="h-7 w-7 -rotate-90" aria-hidden="true">
+   664→   664→                  <circle cx="14" cy="14" r="12" fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="3" />
+   665→   665→                  <circle
+   666→   666→                    key={`${blockNum}-${trialIdx}`}
+   667→   667→                    cx="14" cy="14" r="12" fill="none" stroke="#2dd4bf" strokeWidth="3" strokeLinecap="round"
+   668→   668→                    strokeDasharray="75.4"
+   669→   669→                    className="syn-drain"
+   670→   670→                    style={{ animationDuration: `${TRIAL_MS}ms` }}
+   671→   671→                  />
+   672→   672→                </svg>
+   673→   673→              </div>
+   674→   674→
+   675→   675→              {/* 3×3 grid */}
+   676→   676→              <div className="syn-breathe relative mx-auto grid w-full max-w-[330px] grid-cols-3 gap-2.5" aria-hidden="true">
+   677→   677→                {Array.from({ length: 9 }, (_, i) => (
+   678→   678→                  <div key={i} className={`syn-tile aspect-square ${activeCell === i ? 'syn-tile-on' : ''}`}>
+   679→   679→                    {activeCell === i && <span key={`${blockNum}-${trialIdx}`} className="syn-pulse" />}
+   680→   680→                  </div>
+   681→   681→                ))}
+   682→   682→              </div>
+   683→   683→
+   684→   684→              {/* screen-reader live region + accessibility glyph */}
+   685→   685→              <p className="sr-only" aria-live="polite">
+   686→   686→                {trialIdx >= 0 && activeCell !== null ? `${glyph ?? ''} · ${pick(POS_NAMES[activeCell], locale)}` : ''}
+   687→   687→              </p>
+   688→   688→              <div className="relative flex h-12 items-center justify-center">
+   689→   689→                {showGlyph && glyph && (
+   690→   690→                  <span dir="ltr" className="select-none font-mono text-3xl font-black tracking-widest text-white/55">{glyph}</span>
+   691→   691→                )}
+   692→   692→                <button
+   693→   693→                  type="button"
+   694→   694→                  onClick={() => { sfx.click(); setShowGlyph((v) => !v); }}
+   695→   695→                  aria-label={pick(GLYPH_TOGGLE, locale)}
+   696→   696→                  aria-pressed={showGlyph}
+   697→   697→                  className="pressable absolute end-0 top-1/2 -translate-y-1/2 rounded-lg border border-white/10 bg-white/5 p-1.5 text-white/50 hover:text-white/80"
+   698→   698→                >
+   699→   699→                  {showGlyph ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+   700→   700→                </button>
+   701→   701→              </div>
+   702→   702→
+   703→   703→              {/* response buttons (≥56px, thumb-friendly) */}
+   704→   704→              <div className="grid grid-cols-2 gap-3">
+   705→   705→                <button
+   706→   706→                  type="button"
+   707→   707→                  onClick={() => press('pos')}
+   708→   708→                  aria-label={t('synapse_position')}
+   709→   709→                  className={[
+   710→   710→                    'flex min-h-16 select-none flex-col items-center justify-center gap-0.5 rounded-2xl border font-black transition [touch-action:manipulation]',
+   711→   711→                    fx.pos === 'hit'
+   712→   712→                      ? 'border-teal-300 bg-teal-400/40 text-teal-100 shadow-[0_0_26px_rgba(45,212,191,0.5)]'
+   713→   713→                      : fx.pos === 'fa'
+   714→   714→                        ? 'animate-shake border-rose-400/70 bg-rose-500/25 text-rose-100'
+   715→   715→                        : 'border-teal-400/40 bg-teal-500/15 text-teal-200 active:scale-[0.97]',
+   716→   716→                  ].join(' ')}
+   717→   717→                >
+   718→   718→                  <span className="flex items-center gap-2 text-base sm:text-lg">
+   719→   719→                    <Grid3x3 className="h-5 w-5" />{t('synapse_position')}
+   720→   720→                  </span>
+   721→   721→                  <span className="hidden rounded-md border border-white/20 bg-black/30 px-1.5 text-[10px] font-bold text-white/50 sm:inline" dir="ltr">A</span>
+   722→   722→                </button>
+   723→   723→                <button
+   724→   724→                  type="button"
+   725→   725→                  onClick={() => press('snd')}
+   726→   726→                  aria-label={t('synapse_audio')}
+   727→   727→                  className={[
+   728→   728→                    'flex min-h-16 select-none flex-col items-center justify-center gap-0.5 rounded-2xl border font-black transition [touch-action:manipulation]',
+   729→   729→                    fx.snd === 'hit'
+   730→   730→                      ? 'border-violet-300 bg-violet-400/40 text-violet-100 shadow-[0_0_26px_rgba(192,132,252,0.5)]'
+   731→   731→                      : fx.snd === 'fa'
+   732→   732→                        ? 'animate-shake border-rose-400/70 bg-rose-500/25 text-rose-100'
+   733→   733→                        : 'border-violet-400/40 bg-violet-500/15 text-violet-200 active:scale-[0.97]',
+   734→   734→                  ].join(' ')}
+   735→   735→                >
+   736→   736→                  <span className="flex items-center gap-2 text-base sm:text-lg">
+   737→   737→                    <Volume2 className="h-5 w-5" />{t('synapse_audio')}
+   738→   738→                  </span>
+   739→   739→                  <span className="hidden rounded-md border border-white/20 bg-black/30 px-1.5 text-[10px] font-bold text-white/50 sm:inline" dir="ltr">L</span>
+   740→   740→                </button>
+   741→   741→              </div>
+   742→   742→            </motion.div>
+   743→   743→          )}
+   744→   744→
+   745→   745→          {/* ============================== INTERLUDE (between blocks) ============================== */}
+   746→   746→          {phase === 'interlude' && interlude && (
+   747→   747→            <motion.div key="interlude" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.22 }} className="flex min-h-[78dvh] items-center justify-center">
+   748→   748→              <div className="syn-glass w-full max-w-sm rounded-3xl p-6 text-center">
+   749→   749→                <p className="text-xs font-bold uppercase tracking-widest text-teal-300">
+   750→   750→                  {pick(INTERLUDE_TITLE, locale)} · {loc(interlude.block)}/{loc(SESSION_BLOCKS)}
+   751→   751→                </p>
+   752→   752→                <div className="my-2 text-4xl font-black text-violet-200">{loc(Math.round(interlude.acc * 100))}{pctSign}</div>
+   753→   753→                <p className="text-[11px] text-white/50">{t('synapse_acc')}</p>
+   754→   754→                <div className="my-4 flex items-center justify-center gap-2">
+   755→   755→                  <Badge variant="outline" className="border-white/15 text-white/60"><span dir="ltr">n = {loc(interlude.prevN)}</span></Badge>
+   756→   756→                  {interlude.nextNV > interlude.prevN ? (
+   757→   757→                    <ArrowUp className="h-4 w-4 text-teal-300" aria-label="n+1" />
+   758→   758→                  ) : interlude.nextNV < interlude.prevN ? (
+   759→   759→                    <ArrowDown className="h-4 w-4 text-rose-300" aria-label="n−1" />
+   760→   760→                  ) : (
+   761→   761→                    <Minus className="h-4 w-4 text-white/40" aria-label="n" />
+   762→   762→                  )}
+   763→   763→                  <Badge className="border-violet-400/40 bg-violet-500/15 text-violet-200"><span dir="ltr">n = {loc(interlude.nextNV)}</span></Badge>
+   764→   764→                </div>
+   765→   765→                <div className="mb-4 flex justify-center gap-2 text-[11px]">
+   766→   766→                  <span className="rounded-full border border-teal-400/25 bg-teal-500/10 px-2.5 py-1 text-teal-200">✓ {loc(interlude.hits)}</span>
+   767→   767→                  <span className="rounded-full border border-rose-400/25 bg-rose-500/10 px-2.5 py-1 text-rose-200">✕ {loc(interlude.fas)}</span>
+   768→   768→                </div>
+   769→   769→                <Button
+   770→   770→                  className="h-12 w-full rounded-2xl bg-violet-500/85 text-base font-black text-white hover:bg-violet-500"
+   771→   771→                  onClick={() => { sfx.click(); startBlock(2); }}
+   772→   772→                >
+   773→   773→                  {pick(CONTINUE_BTN, locale)}
+   774→   774→                </Button>
+   775→   775→                <p className="mt-2 text-[10px] text-white/40">{pick(CONTINUE_NOTE, locale)}</p>
+   776→   776→              </div>
+   777→   777→            </motion.div>
+   778→   778→          )}
+   779→   779→
+   780→   780→          {/* ============================== RESULTS ============================== */}
+   781→   781→          {phase === 'results' && summary && (
+   782→   782→            <motion.div key="results" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.25 }} className="space-y-4">
+   783→   783→              <header className="flex items-center gap-2">
+   784→   784→                <Button variant="ghost" size="icon" className="h-9 w-9 rounded-xl border border-white/10 bg-white/5" onClick={exitAll} aria-label={t('back_park')}>
+   785→   785→                  <X className="h-4 w-4" />
+   786→   786→                </Button>
+   787→   787→                <h2 className="text-sm font-black text-white/90">{t('synapse_session_done')}</h2>
+   788→   788→              </header>
+   789→   789→
+   790→   790→              <div className="syn-glass rounded-3xl p-5 text-center">
+   791→   791→                <div className="text-5xl font-black gold-text">{loc(summary.score)}</div>
+   792→   792→                <p className="mt-1 text-xs text-white/50">{t('score')} · {session?.title ?? ''}</p>
+   793→   793→                <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5">
+   794→   794→                  <Badge className="border-teal-400/30 bg-teal-500/10 text-teal-200">
+   795→   795→                    {t('synapse_acc')} {loc(summary.accPct)}{pctSign}
+   796→   796→                  </Badge>
+   797→   797→                  <Badge className="border-rose-400/25 bg-rose-500/10 text-rose-200">
+   798→   798→                    ✕ {loc(summary.pos.fa + summary.snd.fa)}
+   799→   799→                  </Badge>
+   800→   800→                </div>
+   801→   801→                {/* n progression */}
+   802→   802→                <div className="mt-3 flex items-center justify-center gap-1.5" dir="ltr">
+   803→   803→                  {summary.blocks.map((b, i) => (
+   804→   804→                    <span key={i} className="flex items-center gap-1.5">
+   805→   805→                      {i > 0 && <span className="text-white/30">→</span>}
+   806→   806→                      <Badge className="border-violet-400/30 bg-violet-500/10 text-violet-200">
+   807→   807→                        <span dir="ltr">n = {loc(b.n)}</span>
+   808→   808→                      </Badge>
+   809→   809→                    </span>
+   810→   810→                  ))}
+   811→   811→                </div>
+   812→   812→              </div>
+   813→   813→
+   814→   814→              {/* per-channel stats */}
+   815→   815→              <div className="grid grid-cols-2 gap-3">
+   816→   816→                <ChannelCard
+   817→   817→                  title={pick(CHANNEL_POS, locale)}
+   818→   818→                  icon={<Grid3x3 className="h-3.5 w-3.5" />}
+   819→   819→                  tone="teal"
+   820→   820→                  stats={summary.pos}
+   821→   821→                  labels={{ hits: pick(STAT_WORDS.hits, locale), misses: pick(STAT_WORDS.misses, locale), falseAlarms: pick(STAT_WORDS.falseAlarms, locale) }}
+   822→   822→                />
+   823→   823→                <ChannelCard
+   824→   824→                  title={pick(CHANNEL_SND, locale)}
+   825→   825→                  icon={<Volume2 className="h-3.5 w-3.5" />}
+   826→   826→                  tone="violet"
+   827→   827→                  stats={summary.snd}
+   828→   828→                  labels={{ hits: pick(STAT_WORDS.hits, locale), misses: pick(STAT_WORDS.misses, locale), falseAlarms: pick(STAT_WORDS.falseAlarms, locale) }}
+   829→   829→                />
+   830→   830→              </div>
+   831→   831→
+   832→   832→              {!user && (
+   833→   833→                <p className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 text-center text-[11px] leading-relaxed text-white/50">
+   834→   834→                  {pick(LOCAL_SAVE_NOTE, locale)}
+   835→   835→                </p>
+   836→   836→              )}
+   837→   837→
+   838→   838→              <div className="grid grid-cols-2 gap-3">
+   839→   839→                <Button className="h-12 rounded-2xl glow-gold" onClick={() => { sfx.click(); close(); playAgain(); }}>
+   840→   840→                  <RotateCcw className="me-1 h-4 w-4" />{t('arcade_again')}
+   841→   841→                </Button>
+   842→   842→                <Button variant="outline" className="h-12 rounded-2xl" onClick={() => { sfx.click(); setSummary(null); go('home'); }}>
+   843→   843→                  {pick(MENU_BTN, locale)}
+   844→   844→                </Button>
+   845→   845→              </div>
+   846→   846→            </motion.div>
+   847→   847→          )}
+   848→   848→        </AnimatePresence>
+   849→   849→      </div>
+   850→   850→
+   851→   851→      {/* briefing dialog (campaign days + practice) */}
+   852→   852→      <Dialog open={brief !== null} onOpenChange={(o) => { if (!o) setBrief(null); }}>
+   853→   853→        <DialogContent className="syn-glass rounded-3xl sm:max-w-sm" dir={isRtl ? 'rtl' : 'ltr'} aria-describedby={undefined}>
+   854→   854→          <DialogHeader>
+   855→   855→            <DialogTitle className="text-center text-violet-100">
+   856→   856→              <span className="me-1 inline-block">🧠</span>{brief?.title}
+   857→   857→            </DialogTitle>
+   858→   858→            <DialogDescription className="text-center text-[11px] text-white/45">{brief?.actTitle}</DialogDescription>
+   859→   859→          </DialogHeader>
+   860→   860→          <p className="min-h-14 text-center text-sm leading-relaxed text-white/75">{brief?.note}</p>
+   861→   861→          <div className="flex justify-center">
+   862→   862→            <Badge className="border-violet-400/40 bg-violet-500/15 text-violet-200">
+   863→   863→              <span dir="ltr">{t('synapse_n_back')}: n = {loc(brief?.startN ?? 2)}</span>
+   864→   864→            </Badge>
+   865→   865→          </div>
+   866→   866→          <Button
+   867→   867→            className="glow-purple h-12 w-full rounded-2xl bg-violet-500/85 text-base font-black text-white hover:bg-violet-500"
+   868→   868→            onClick={() => {
+   869→   869→              const b = brief;
+   870→   870→              setBrief(null);
+   871→   871→              if (b) startSession(b.mode, b.day, b.startN, b.title);
+   872→   872→            }}
+   873→   873→          >
+   874→   874→            <Play className="me-1.5 h-4 w-4" />{t('synapse_start')}
+   875→   875→          </Button>
+   876→   876→        </DialogContent>
+   877→   877→      </Dialog>
+   878→   878→
+   879→   879→      {/* shared economy result modal */}
+   880→   880→      <ArcadeResultModal
+   881→   881→        open={open}
+   882→   882→        title={t('synapse_session_done')}
+   883→   883→        subtitle={session?.mode === 'campaign' ? `${t('synapse_day')} ${loc(session.day)} · ${session.title}` : pick(PRACTICE_TITLE, locale)}
+   884→   884→        score={score}
+   885→   885→        rewards={rewards}
+   886→   886→        emoji="🧠"
+   887→   887→        onAgain={() => { close(); playAgain(); }}
+   888→   888→        onExit={exitAll}
+   889→   889→      />
+   890→   890→    </div>
+   891→   891→  );
+   892→   892→}
+   893→   893→

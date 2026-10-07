@@ -1,0 +1,1221 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * StoreView — "بازار دوئل" (Duel Bazaar): category tabs, item grid with
+     5→ * procedural pixel-art previews, coin/level-gated buying (confirm dialog)
+     6→ * and one-click equip. /api/store is the source of truth; the useApp
+     7→ * session (coins / equipped fields) is kept in sync after every action.
+     8→ */
+     9→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+    10→import Image from 'next/image';
+    11→import { AnimatePresence, motion } from 'framer-motion';
+    12→import { useApp } from '@/store/app';
+    13→import { api } from '@/lib/api';
+    14→import { localizeDigits, type Locale, type TKey } from '@/lib/i18n';
+    15→import { RARITY_META, type ItemCategory, type Rarity } from '@/lib/game/content';
+    16→import { AvatarBubble, PieceDisc } from '@/components/shared/PixelSprite';
+    17→import { sfx } from '@/lib/sound';
+    18→import { toast } from 'sonner';
+    19→import { Badge } from '@/components/ui/badge';
+    20→import { Button } from '@/components/ui/button';
+    21→import { Skeleton } from '@/components/ui/skeleton';
+    22→import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    23→import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+    24→import {
+    25→  AlertDialog,
+    26→  AlertDialogAction,
+    27→  AlertDialogCancel,
+    28→  AlertDialogContent,
+    29→  AlertDialogDescription,
+    30→  AlertDialogFooter,
+    31→  AlertDialogHeader,
+    32→  AlertDialogTitle,
+    33→} from '@/components/ui/alert-dialog';
+    34→import {
+    35→  Coins,
+    36→  Eye,
+    37→  EyeOff,
+    38→  Gift,
+    39→  Package,
+    40→  PackageOpen,
+    41→  ShieldCheck,
+    42→  Sparkles,
+    43→} from 'lucide-react';
+    44→import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+    45→
+    46→/* ================= types & helpers ================= */
+    47→
+    48→interface StoreItemDTO {
+    49→  code: string;
+    50→  category: ItemCategory;
+    51→  rarity: Rarity;
+    52→  price: number;
+    53→  requiredLevel: number;
+    54→  data: Record<string, unknown>;
+    55→  active: boolean;
+    56→  sales: number;
+    57→}
+    58→
+    59→interface StoreMe {
+    60→  coins: number;
+    61→  level: number;
+    62→  pieceSkin: string;
+    63→  boardSkin: string;
+    64→  background: string;
+    65→  effectSkin: string;
+    66→  avatarItem: string;
+    67→  titleItem: string | null;
+    68→  emotePack: string;
+    69→}
+    70→
+    71→type EquipField = 'pieceSkin' | 'boardSkin' | 'background' | 'effectSkin' | 'avatarItem' | 'titleItem' | 'emotePack';
+    72→
+    73→const CATS: ItemCategory[] = ['EMOTE', 'PIECE', 'BOARD', 'AVATAR', 'BACKGROUND', 'EFFECT', 'TITLE'];
+    74→
+    75→const EQUIP_FIELD: Record<ItemCategory, EquipField> = {
+    76→  EMOTE: 'emotePack',
+    77→  PIECE: 'pieceSkin',
+    78→  BOARD: 'boardSkin',
+    79→  BACKGROUND: 'background',
+    80→  EFFECT: 'effectSkin',
+    81→  AVATAR: 'avatarItem',
+    82→  TITLE: 'titleItem',
+    83→};
+    84→
+    85→/** 'piece_rose' → 'Rose', 'bg_royal_velvet' → 'Royal velvet' */
+    86→function prettyName(code: string): string {
+    87→  const s = code.split('_').slice(1).join(' ').trim();
+    88→  return s ? s.charAt(0).toUpperCase() + s.slice(1) : code;
+    89→}
+    90→
+    91→/** Percent sign follows the script: Arabic percent for fa/ar, latin for en/tr. */
+    92→const PCT_SIGN: Record<Locale, string> = { fa: '٪', ar: '٪', en: '%', tr: '%' };
+    93→
+    94→/** Immutably write the equipped code into the right skin/avatar/title field. */
+    95→function equipApply<T extends { pieceSkin: string; boardSkin: string; background: string; effectSkin: string; avatarItem: string; titleItem: string | null }>(
+    96→  obj: T,
+    97→  field: EquipField,
+    98→  code: string,
+    99→): T {
+   100→  const next = { ...obj };
+   101→  if (field === 'pieceSkin') next.pieceSkin = code;
+   102→  else if (field === 'boardSkin') next.boardSkin = code;
+   103→  else if (field === 'background') next.background = code;
+   104→  else if (field === 'effectSkin') next.effectSkin = code;
+   105→  else if (field === 'avatarItem') next.avatarItem = code;
+   106→  else next.titleItem = code;
+   107→  return next;
+   108→}
+   109→
+   110→/* ================= category previews (pure CSS / pixel sprites) ================= */
+   111→
+   112→function ItemPreview({ item, glow }: { item: StoreItemDTO; glow: boolean }) {
+   113→  const d = item.data as { cell?: string; cell2?: string; hole?: string; numeral?: string; colors?: string[]; accent?: string };
+   114→
+   115→  switch (item.category) {
+   116→    case 'EMOTE': {
+   117→      const pack = (item.data as { emotes?: { id: string; emoji: string }[] }).emotes ?? [];
+   118→      return (
+   119→        <div className="flex h-16 w-full items-center justify-center gap-1.5">
+   120→          {pack.map((e) => (
+   121→            <span key={e.id} className={`grid h-9 w-9 place-items-center rounded-xl border text-xl ${glow ? 'border-amber-400/60 bg-amber-400/10' : 'border-border bg-muted/60'}`}>
+   122→              {e.emoji}
+   123→            </span>
+   124→          ))}
+   125→        </div>
+   126→      );
+   127→    }
+   128→    case 'PIECE':
+   129→      return (
+   130→        <div style={glow ? { filter: `drop-shadow(0 0 7px ${RARITY_META[item.rarity].glow})` } : undefined}>
+   131→          <PieceDisc code={item.code} side={1} size={64} />
+   132→        </div>
+   133→      );
+   134→    case 'AVATAR':
+   135→      return <AvatarBubble code={item.code} size={64} glow={glow} />;
+   136→    case 'BOARD': {
+   137→      const cell = d.cell ?? '#e3b878';
+   138→      const cell2 = d.cell2 ?? '#d9a860';
+   139→      const hole = d.hole ?? '#faf6ee';
+   140→      const numeral = d.numeral ?? '#4a2e12';
+   141→      return (
+   142→        <div
+   143→          className="grid h-16 w-16 place-items-center rounded-lg"
+   144→          style={{
+   145→            background: `linear-gradient(135deg, ${cell}, ${cell2})`,
+   146→            border: `2px solid ${numeral}`,
+   147→            boxShadow: 'inset 0 1px 5px rgba(0,0,0,.35)',
+   148→          }}
+   149→        >
+   150→          <span className="block h-3.5 w-3.5 rounded-full" style={{ background: hole, boxShadow: `0 0 6px ${numeral}` }} />
+   151→        </div>
+   152→      );
+   153→    }
+   154→    case 'BACKGROUND': {
+   155→      const c = d.colors ?? ['#0f0524', '#1e1145', '#2a1a5e'];
+   156→      const accent = d.accent ?? '#d4af37';
+   157→      return (
+   158→        <div
+   159→          className="relative h-16 w-16 overflow-hidden rounded-lg border border-white/15"
+   160→          style={{ background: `linear-gradient(135deg, ${c[0] ?? '#000'}, ${c[1] ?? '#111'} 55%, ${c[2] ?? '#222'})` }}
+   161→        >
+   162→          <span
+   163→            className="absolute bottom-1.5 end-1.5 block h-2.5 w-2.5 rounded-full"
+   164→            style={{ background: accent, boxShadow: `0 0 8px ${accent}` }}
+   165→          />
+   166→        </div>
+   167→      );
+   168→    }
+   169→    case 'EFFECT': {
+   170→      const c = d.colors ?? ['#fbbf24', '#f472b6', '#34d399', '#c084fc'];
+   171→      return (
+   172→        <div
+   173→          className="grid h-16 w-16 place-items-center text-[34px]"
+   174→          style={{
+   175→            background: `linear-gradient(135deg, ${c.join(', ')})`,
+   176→            WebkitBackgroundClip: 'text',
+   177→            backgroundClip: 'text',
+   178→            color: 'transparent',
+   179→          }}
+   180→          aria-hidden
+   181→        >
+   182→          🎉
+   183→        </div>
+   184→      );
+   185→    }
+   186→    case 'TITLE':
+   187→      return (
+   188→        <div className="flex h-16 w-16 flex-col items-center justify-center gap-1 rounded-lg bg-amber-400/10">
+   189→          <span className="text-2xl" aria-hidden>
+   190→            👑
+   191→          </span>
+   192→          <span className="max-w-14 truncate text-[9px] font-black text-amber-300">{prettyName(item.code)}</span>
+   193→        </div>
+   194→      );
+   195→    default:
+   196→      return null;
+   197→  }
+   198→}
+   199→
+   200→/* ================= v0.1.0-alpha: Fortune Chests (صندوق‌های شانس) ================= */
+   201→
+   202→type DropKind = 'COINS' | 'XP' | 'ITEM';
+   203→
+   204→interface MarketDropDTO {
+   205→  id: string;
+   206→  kind: DropKind;
+   207→  itemCode: string | null;
+   208→  amount: number;
+   209→  weight: number;
+   210→}
+   211→
+   212→interface MarketBoxDTO {
+   213→  code: string;
+   214→  rarity: Rarity;
+   215→  price: number;
+   216→  image: string;
+   217→  opens: number;
+   218→  drops: MarketDropDTO[];
+   219→}
+   220→
+   221→interface BoxGrantDTO {
+   222→  id: string;
+   223→  boxCode: string;
+   224→  source: string; // PURCHASE | GIFT | ADMIN
+   225→  createdAt: string;
+   226→}
+   227→
+   228→interface OpenResultDTO {
+   229→  ok: boolean;
+   230→  drop: { kind: DropKind; itemCode: string | null; amount: number };
+   231→  item: { code: string; dupe: boolean; refund: number; rarity: string } | null;
+   232→  coinsDelta: number;
+   233→  xpDelta: number;
+   234→  levelUps: number;
+   235→  user: { coins: number; xp: number; level: number };
+   236→  unlockedAchievements: { id: string; coins: number; rarity: string }[];
+   237→}
+   238→
+   239→type StoreTab = 'CHESTS' | ItemCategory;
+   240→
+   241→/** Fallback emoji when an ITEM drop has no procedural preview available. */
+   242→const ITEM_EMOJI: Record<string, string> = {
+   243→  piece: '⚪',
+   244→  board: '▦',
+   245→  avatar: '🙂',
+   246→  background: '🖼️',
+   247→  effect: '✨',
+   248→  title: '👑',
+   249→};
+   250→
+   251→/**
+   252→ * Chest artwork. The /art renders are 1024² with a dark backdrop, so they sit
+   253→ * on a dark rounded+ring tile and use mix-blend-screen to melt into any bg.
+   254→ * If the png is missing (404), we gracefully fall back to a rarity-tinted
+   255→ * gradient tile with a gift emoji — the experience never breaks.
+   256→ */
+   257→function ChestGlyph({ rarity, size }: { rarity: Rarity; size: number }) {
+   258→  const meta = RARITY_META[rarity];
+   259→  return (
+   260→    <span style={{ fontSize: Math.round(size * 0.42), filter: `drop-shadow(0 0 10px ${meta.glow})` }} aria-hidden>
+   261→      🎁
+   262→    </span>
+   263→  );
+   264→}
+   265→
+   266→function ChestArt({ image, rarity, size }: { image: string; rarity: Rarity; size: number }) {
+   267→  const meta = RARITY_META[rarity];
+   268→  return (
+   269→    <div
+   270→      className="relative grid shrink-0 place-items-center overflow-hidden rounded-2xl ring-1 ring-white/10"
+   271→      style={{
+   272→        width: size,
+   273→        height: size,
+   274→        background: `radial-gradient(120% 120% at 50% 18%, ${meta.color}2e 0%, #06060e 62%)`,
+   275→        boxShadow: `0 0 ${Math.round(size / 4)}px ${meta.glow}, inset 0 0 16px rgba(0,0,0,.55)`,
+   276→      }}
+   277→    >
+   278→      {image ? (
+   279→        <ChestImg key={image} image={image} rarity={rarity} size={size} />
+   280→      ) : (
+   281→        <ChestGlyph rarity={rarity} size={size} />
+   282→      )}
+   283→    </div>
+   284→  );
+   285→}
+   286→
+   287→/** Image loader with per-src error fallback (remounts reset the error state). */
+   288→function ChestImg({ image, rarity, size }: { image: string; rarity: Rarity; size: number }) {
+   289→  const [err, setErr] = useState(false);
+   290→  if (err) return <ChestGlyph rarity={rarity} size={size} />;
+   291→  return (
+   292→    <Image
+   293→      src={image}
+   294→      alt=""
+   295→      width={size}
+   296→      height={size}
+   297→      sizes={`${size}px`}
+   298→      className="object-contain mix-blend-screen"
+   299→      style={{ filter: `drop-shadow(0 0 10px ${RARITY_META[rarity].glow})` }}
+   300→      onError={() => setErr(true)}
+   301→    />
+   302→  );
+   303→}
+   304→
+   305→/** Rotating conic-gradient burst rays, revealed behind the reward. */
+   306→function BurstRays({ color }: { color: string }) {
+   307→  return (
+   308→    <motion.div
+   309→      aria-hidden
+   310→      className="pointer-events-none absolute inset-0 m-auto h-[440px] w-[440px] rounded-full"
+   311→      style={{
+   312→        background: `repeating-conic-gradient(from 0deg, ${color}40 0deg 7deg, transparent 7deg 18deg)`,
+   313→        WebkitMaskImage: 'radial-gradient(closest-side, rgba(0,0,0,.95), transparent 74%)',
+   314→        maskImage: 'radial-gradient(closest-side, rgba(0,0,0,.95), transparent 74%)',
+   315→      }}
+   316→      initial={{ opacity: 0, scale: 0.35, rotate: 0 }}
+   317→      animate={{ opacity: [0, 0.9, 0.55], scale: [0.35, 1, 1.1], rotate: 360 }}
+   318→      transition={{
+   319→        opacity: { duration: 0.9 },
+   320→        scale: { duration: 0.8, ease: 'easeOut' },
+   321→        rotate: { duration: 18, repeat: Infinity, ease: 'linear' },
+   322→      }}
+   323→    />
+   324→  );
+   325→}
+   326→
+   327→const CONFETTI_COLORS = ['#fbbf24', '#f472b6', '#34d399', '#c084fc', '#f43f5e', '#38bdf8', '#fde047'];
+   328→
+   329→/** Lightweight confetti — absolutely-positioned animated divs, no new deps. */
+   330→function Confetti({ seed }: { seed: number }) {
+   331→  const parts = useMemo(
+   332→    () =>
+   333→      Array.from({ length: 30 }, (_, i) => ({
+   334→        id: i,
+   335→        x: (Math.random() - 0.5) * 340,
+   336→        y: -(70 + Math.random() * 170),
+   337→        rot: Math.random() * 720 - 360,
+   338→        dur: 1 + Math.random(),
+   339→        delay: Math.random() * 0.18,
+   340→        c: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+   341→        w: 5 + Math.random() * 6,
+   342→      })),
+   343→    [seed],
+   344→  );
+   345→  return (
+   346→    <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+   347→      {parts.map((p) => (
+   348→        <motion.span
+   349→          key={`${seed}-${p.id}`}
+   350→          className="absolute left-1/2 top-[38%] block rounded-[2px]"
+   351→          style={{ width: p.w, height: Math.round(p.w * 0.5), background: p.c }}
+   352→          initial={{ x: 0, y: 0, opacity: 1, rotate: 0 }}
+   353→          animate={{ x: p.x, y: [0, p.y, 330], opacity: [1, 1, 0], rotate: p.rot }}
+   354→          transition={{ duration: p.dur + 0.9, delay: p.delay, ease: 'easeOut', times: [0, 0.42, 1] }}
+   355→        />
+   356→      ))}
+   357→    </div>
+   358→  );
+   359→}
+   360→
+   361→/** Big reward icon inside the reveal ring (reuses the item renderers above). */
+   362→function RewardVisual({ kind, itemCode, catalogItem }: { kind: DropKind; itemCode: string | null; catalogItem: StoreItemDTO | null }) {
+   363→  if (kind === 'COINS') return <span className="text-5xl drop-shadow-[0_0_16px_rgba(251,191,36,.85)]" aria-hidden>🪙</span>;
+   364→  if (kind === 'XP') return <span className="text-5xl text-violet-300 drop-shadow-[0_0_16px_rgba(192,132,252,.85)]" aria-hidden>✦</span>;
+   365→  const code = itemCode ?? '';
+   366→  const prefix = code.split('_')[0] ?? '';
+   367→  if (prefix === 'piece') return <PieceDisc code={code} side={1} size={72} />;
+   368→  if (prefix === 'avatar') return <AvatarBubble code={code} size={72} glow />;
+   369→  if (catalogItem) return <ItemPreview item={catalogItem} glow />;
+   370→  return <span className="text-5xl" aria-hidden>{ITEM_EMOJI[prefix] ?? '📦'}</span>;
+   371→}
+   372→
+   373→/** Reveal stage of the opening dialog: burst rays + glow ring + reward card. */
+   374→function RevealContent({
+   375→  result,
+   376→  box,
+   377→  catalog,
+   378→  remaining,
+   379→  seed,
+   380→  t,
+   381→  locale,
+   382→  onAnother,
+   383→  onClose,
+   384→}: {
+   385→  result: OpenResultDTO;
+   386→  box: MarketBoxDTO;
+   387→  catalog: StoreItemDTO[];
+   388→  remaining: number;
+   389→  seed: number;
+   390→  t: (k: TKey) => string;
+   391→  locale: Locale;
+   392→  onAnother: () => void;
+   393→  onClose: () => void;
+   394→}) {
+   395→  const item = result.item;
+   396→  const rar = (item ? (item.rarity as Rarity) : box.rarity);
+   397→  const rmeta = RARITY_META[rar];
+   398→  const catItem = item ? catalog.find((it) => it.code === item.code) ?? null : null;
+   399→  return (
+   400→    <motion.div
+   401→      initial={{ scale: 0.55, opacity: 0 }}
+   402→      animate={{ scale: 1, opacity: 1 }}
+   403→      exit={{ opacity: 0, scale: 0.9 }}
+   404→      transition={{ type: 'spring', stiffness: 240, damping: 17 }}
+   405→      className="relative flex w-full flex-col items-center"
+   406→    >
+   407→      <div className="relative mt-1 grid place-items-center">
+   408→        <BurstRays color={rmeta.color} />
+   409→        <Confetti seed={seed} />
+   410→        <div
+   411→          className="relative grid h-28 w-28 place-items-center rounded-full border-2"
+   412→          style={{
+   413→            borderColor: `${rmeta.color}99`,
+   414→            boxShadow: `0 0 70px ${rmeta.glow}, inset 0 0 26px ${rmeta.glow}`,
+   415→            background: '#06060e',
+   416→          }}
+   417→        >
+   418→          <RewardVisual kind={result.drop.kind} itemCode={result.drop.itemCode} catalogItem={catItem} />
+   419→        </div>
+   420→      </div>
+   421→
+   422→      <div className="mt-3 text-lg font-black gold-text">{t('box_congrats')}</div>
+   423→
+   424→      {result.drop.kind === 'COINS' && (
+   425→        <>
+   426→          <div className="mt-1 text-2xl font-black text-amber-400">+{localizeDigits(result.drop.amount, locale)} 🪙</div>
+   427→          <div className="text-xs font-bold text-muted-foreground">{t('box_won_coins')}</div>
+   428→        </>
+   429→      )}
+   430→      {result.drop.kind === 'XP' && (
+   431→        <>
+   432→          <div className="mt-1 text-2xl font-black text-violet-300">+{localizeDigits(result.drop.amount, locale)} ✦</div>
+   433→          <div className="text-xs font-bold text-muted-foreground">{t('box_won_xp')}</div>
+   434→        </>
+   435→      )}
+   436→      {result.drop.kind === 'ITEM' && item && (
+   437→        <>
+   438→          <div className="mt-1 max-w-full truncate text-base font-black" style={{ color: rmeta.color }}>
+   439→            {prettyName(item.code)}
+   440→          </div>
+   441→          <Badge
+   442→            variant="outline"
+   443→            className="mt-1 text-[9px] font-black"
+   444→            style={{ color: rmeta.color, borderColor: `${rmeta.color}55`, background: `${rmeta.color}14` }}
+   445→          >
+   446→            {t('box_won_item')} · {t(`rarity_${rar}` as TKey)}
+   447→          </Badge>
+   448→          {item.dupe && (
+   449→            <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-400/10 px-3 py-1.5 text-xs font-bold text-amber-300">
+   450→              {t('box_dupe')} · 🪙 +{localizeDigits(item.refund, locale)}
+   451→            </div>
+   452→          )}
+   453→        </>
+   454→      )}
+   455→
+   456→      {result.levelUps > 0 && (
+   457→        <div className="mt-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-black text-emerald-300">
+   458→          ⬆ {t('level_up')} · {t('level')} {localizeDigits(result.user.level, locale)}
+   459→        </div>
+   460→      )}
+   461→
+   462→      <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+   463→        {remaining > 0 && (
+   464→          <Button className="h-11 px-5 font-black glow-gold" onClick={onAnother}>
+   465→            <PackageOpen className="h-4 w-4" />
+   466→            {t('box_open')}
+   467→          </Button>
+   468→        )}
+   469→        <Button variant="outline" className="h-11 px-5 font-black" onClick={onClose}>
+   470→          {t('cancel')}
+   471→        </Button>
+   472→      </div>
+   473→    </motion.div>
+   474→  );
+   475→}
+   476→
+   477→/* ================= view ================= */
+   478→
+   479→export function StoreView() {
+   480→  const { user, t, locale, patchUser, refreshSession } = useApp();
+   481→  const uid = user?.id;
+   482→  const [items, setItems] = useState<StoreItemDTO[]>([]);
+   483→  const [owned, setOwned] = useState<string[]>([]);
+   484→  const [me, setMe] = useState<StoreMe | null>(null);
+   485→  const [loading, setLoading] = useState(true);
+   486→  const [cat, setCat] = useState<StoreTab>('CHESTS');
+   487→  const [confirmItem, setConfirmItem] = useState<StoreItemDTO | null>(null);
+   488→  const [busyBuy, setBusyBuy] = useState<string | null>(null);
+   489→
+   490→  /* ---------- fortune chests (market) state ---------- */
+   491→  const [boxes, setBoxes] = useState<MarketBoxDTO[]>([]);
+   492→  const [inventory, setInventory] = useState<BoxGrantDTO[]>([]);
+   493→  const [marketLoading, setMarketLoading] = useState(true);
+   494→  const [oddsFor, setOddsFor] = useState<string | null>(null);
+   495→  const [confirmBox, setConfirmBox] = useState<MarketBoxDTO | null>(null);
+   496→  const [busyBox, setBusyBox] = useState(false);
+   497→  const [opening, setOpening] = useState<{ grant: BoxGrantDTO; box: MarketBoxDTO } | null>(null);
+   498→  const [openPhase, setOpenPhase] = useState<'shake' | 'reveal'>('shake');
+   499→  const [openResult, setOpenResult] = useState<OpenResultDTO | null>(null);
+   500→  const [revealSeed, setRevealSeed] = useState(0);
+   501→  const [flash, setFlash] = useState(false);
+   502→
+   503→  /* catalog + ownership; refetches when session appears/changes */
+   504→  useEffect(() => {
+   505→    let live = true;
+   506→    api
+   507→      .get<{ items: StoreItemDTO[]; owned: string[]; me: StoreMe | null }>('/api/store')
+   508→      .then((d) => {
+   509→        if (!live) return;
+   510→        setItems(d.items);
+   511→        setOwned(d.owned);
+   512→        setMe(d.me);
+   513→      })
+   514→      .catch(() => {
+   515→        if (live) toast.error(t('error'));
+   516→      })
+   517→      .finally(() => {
+   518→        if (live) setLoading(false);
+   519→      });
+   520→    return () => {
+   521→      live = false;
+   522→    };
+   523→  }, [t, uid]);
+   524→
+   525→  /* ---------- market: chest catalog + my unopened grants ---------- */
+   526→  const refreshMarket = useCallback(
+   527→    async (silent = false) => {
+   528→      try {
+   529→        const d = await api.get<{ boxes: MarketBoxDTO[]; inventory: BoxGrantDTO[]; me: { coins: number; level: number } | null }>('/api/market');
+   530→        setBoxes(d.boxes);
+   531→        setInventory(d.inventory);
+   532→        const dm = d.me;
+   533→        if (dm) setMe((m) => (m ? { ...m, coins: dm.coins, level: dm.level } : m));
+   534→      } catch {
+   535→        if (!silent) toast.error(t('error'));
+   536→      } finally {
+   537→        setMarketLoading(false);
+   538→      }
+   539→    },
+   540→    [t],
+   541→  );
+   542→
+   543→  useEffect(() => {
+   544→    void refreshMarket();
+   545→  }, [refreshMarket, uid]);
+   546→
+   547→  const coins = me?.coins ?? user?.coins ?? 0;
+   548→  const level = me?.level ?? user?.level ?? 1;
+   549→  const cur = me ??
+   550→    (user
+   551→      ? {
+   552→          pieceSkin: user.pieceSkin,
+   553→          boardSkin: user.boardSkin,
+   554→          background: user.background,
+   555→          effectSkin: user.effectSkin,
+   556→          avatarItem: user.avatarItem,
+   557→          titleItem: user.titleItem,
+   558→        }
+   559→      : null);
+   560→
+   561→  const isEquipped = (item: StoreItemDTO) => (cur ? cur[EQUIP_FIELD[item.category]] === item.code : false);
+   562→
+   563→  const shown = items
+   564→    .filter((i) => i.category === cat)
+   565→    .sort((a, b) => RARITY_META[a.rarity].order - RARITY_META[b.rarity].order || a.price - b.price);
+   566→
+   567→  /* ---------- buy ---------- */
+   568→  const doBuy = async () => {
+   569→    if (!confirmItem) return;
+   570→    const target = confirmItem;
+   571→    setBusyBuy(target.code);
+   572→    try {
+   573→      const res = await api.post<{ ok: boolean; coins: number }>('/api/store', { code: target.code });
+   574→      sfx.coin();
+   575→      toast.success(t('purchased'));
+   576→      setOwned((o) => (o.includes(target.code) ? o : [...o, target.code]));
+   577→      setMe((m) => (m && typeof res.coins === 'number' ? { ...m, coins: res.coins } : m));
+   578→      void refreshSession();
+   579→    } catch (e) {
+   580→      const code = (e as Error).message;
+   581→      const need = (e as { payload?: { need?: number } }).payload?.need;
+   582→      if (code === 'COINS') toast.error(t('not_enough'));
+   583→      else if (code === 'LEVEL') toast.error(`${t('need_level')} ${localizeDigits(need ?? target.requiredLevel, locale)}`);
+   584→      else if (code === 'OWNED') {
+   585→        toast.error(t('owned'));
+   586→        setOwned((o) => (o.includes(target.code) ? o : [...o, target.code]));
+   587→      } else if (code === 'AUTH') toast.error(t('login'));
+   588→      else toast.error(t('error'));
+   589→    } finally {
+   590→      setBusyBuy(null);
+   591→      setConfirmItem(null);
+   592→    }
+   593→  };
+   594→
+   595→  /* ---------- chest buy (play-earned coins only) ---------- */
+   596→  const doBuyBox = async () => {
+   597→    if (!confirmBox) return;
+   598→    const target = confirmBox;
+   599→    setBusyBox(true);
+   600→    try {
+   601→      const res = await api.post<{ ok: boolean; coins: number }>('/api/market', { action: 'buy', boxCode: target.code });
+   602→      sfx.coin();
+   603→      toast.success(t('purchased'));
+   604→      if (user && typeof res.coins === 'number') patchUser({ coins: res.coins });
+   605→      setMe((m) => (m && typeof res.coins === 'number' ? { ...m, coins: res.coins } : m));
+   606→      void refreshMarket(true);
+   607→    } catch (e) {
+   608→      const code = (e as Error).message;
+   609→      if (code === 'COINS') toast.error(t('not_enough'));
+   610→      else if (code === 'AUTH') toast.error(t('login'));
+   611→      else toast.error(t('error'));
+   612→    } finally {
+   613→      setBusyBox(false);
+   614→      setConfirmBox(null);
+   615→    }
+   616→  };
+   617→
+   618→  /* ---------- chest OPEN: suspense ≥900 ms, then reveal ---------- */
+   619→  const busyOpenRef = useRef(false); // double-fire guard (survives stale closures)
+   620→  const startOpen = (grant: BoxGrantDTO) => {
+   621→    if (!user || busyOpenRef.current) return;
+   622→    const box = boxes.find((b) => b.code === grant.boxCode);
+   623→    if (!box) return;
+   624→    busyOpenRef.current = true;
+   625→    sfx.click();
+   626→    setRevealSeed((s) => s + 1);
+   627→    setOpenResult(null);
+   628→    setOpenPhase('shake');
+   629→    setOpening({ grant, box });
+   630→    const t0 = Date.now();
+   631→    void (async () => {
+   632→      try {
+   633→        const res = await api.post<OpenResultDTO>('/api/market', { action: 'open', grantId: grant.id });
+   634→        const wait = Math.max(0, 900 - (Date.now() - t0)); // suspense always plays
+   635→        window.setTimeout(() => {
+   636→          busyOpenRef.current = false; // "open another" may fire again
+   637→          setOpenResult(res);
+   638→          setOpenPhase('reveal');
+   639→          /* sync zustand session + server truth */
+   640→          patchUser({ coins: res.user.coins, xp: res.user.xp, level: res.user.level });
+   641→          void refreshSession();
+   642→          void refreshMarket(true);
+   643→          /* reveal sound design: coin for coins, fanfare for items/big rarities */
+   644→          const rar = (res.item ? (res.item.rarity as Rarity) : box.rarity);
+   645→          if (res.drop.kind === 'ITEM' || rar === 'LEGENDARY' || rar === 'ULTIMATE') sfx.achievement();
+   646→          else sfx.coin();
+   647→          if (rar === 'ULTIMATE' || box.rarity === 'ULTIMATE') {
+   648→            setFlash(true);
+   649→            window.setTimeout(() => setFlash(false), 280);
+   650→          }
+   651→          for (const a of res.unlockedAchievements) {
+   652→            toast.success(`🏅 ${t('ach_unlocked')} +${localizeDigits(a.coins, locale)} 🪙`);
+   653→          }
+   654→          if (res.levelUps > 0) sfx.levelup();
+   655→        }, wait);
+   656→      } catch (e) {
+   657→        const errCode = (e as Error).message;
+   658→        window.setTimeout(
+   659→          () => {
+   660→            busyOpenRef.current = false;
+   661→            if (errCode === 'AUTH') toast.error(t('login'));
+   662→            else toast.error(t('error'));
+   663→            setOpening(null);
+   664→            void refreshMarket(true);
+   665→          },
+   666→          Math.max(0, 600 - (Date.now() - t0)),
+   667→        );
+   668→      }
+   669→    })();
+   670→  };
+   671→
+   672→  const closeOpening = () => {
+   673→    /* keep the suspense unskippable while the chest shakes */
+   674→    if (openPhase === 'shake') return;
+   675→    busyOpenRef.current = false;
+   676→    setOpening(null);
+   677→    setOpenResult(null);
+   678→    setOpenPhase('shake');
+   679→  };
+   680→
+   681→  const openAnother = () => {
+   682→    if (!opening) return;
+   683→    const next = inventory.find((g) => g.id !== opening.grant.id);
+   684→    if (!next) {
+   685→      closeOpening();
+   686→      return;
+   687→    }
+   688→    startOpen(next);
+   689→  };
+   690→
+   691→  const remainingAfterOpen = opening ? inventory.filter((g) => g.id !== opening.grant.id).length : 0;
+   692→
+   693→  /* ---------- equip ---------- */
+   694→  const doEquip = async (item: StoreItemDTO) => {
+   695→    try {
+   696→      await api.post('/api/store/equip', { code: item.code });
+   697→      sfx.click();
+   698→      toast.success(t('equipped_done'));
+   699→      const field = EQUIP_FIELD[item.category];
+   700→      if (user) patchUser(equipApply(user, field, item.code));
+   701→      setMe((m) => (m ? equipApply(m, field, item.code) : m));
+   702→      void refreshSession();
+   703→    } catch {
+   704→      toast.error(t('error'));
+   705→    }
+   706→  };
+   707→
+   708→  return (
+   709→    <div className="mx-auto w-full max-w-5xl px-4 pb-10">
+   710→      {/* ---------- header ---------- */}
+   711→      <section className="royal-card relative mt-4 overflow-hidden rounded-3xl p-5 sm:p-6">
+   712→        <div className="pointer-events-none absolute inset-0 shimmer" aria-hidden />
+   713→        <div className="flex flex-wrap items-center justify-between gap-3">
+   714→          <div>
+   715→            <h1 className="text-2xl font-black sm:text-3xl">
+   716→              🛒 <span className="gold-text">{t('store_title')}</span>
+   717→            </h1>
+   718→            <p className="mt-1 text-xs text-muted-foreground sm:text-sm">{t('store_sub')}</p>
+   719→          </div>
+   720→          <div
+   721→            className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-400/10 px-3.5 py-1.5 text-sm font-black text-amber-400 glow-gold"
+   722→            title={t('coins')}
+   723→          >
+   724→            <Coins className="h-4 w-4" />
+   725→            {localizeDigits(coins, locale)}
+   726→            <span className="text-[10px] font-bold opacity-75">{t('coins')}</span>
+   727→          </div>
+   728→        </div>
+   729→        {!user && (
+   730→          <p className="mt-3 text-xs text-muted-foreground">
+   731→            {t('auth_no')} <b className="text-amber-400">{t('login')} →</b>
+   732→          </p>
+   733→        )}
+   734→      </section>
+   735→
+   736→      {/* ---------- category tabs ---------- */}
+   737→      <Tabs
+   738→        value={cat}
+   739→        onValueChange={(v) => {
+   740→          sfx.click();
+   741→          setCat(v as StoreTab);
+   742→        }}
+   743→        className="mt-4"
+   744→      >
+   745→        <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-muted/60 p-1 sm:w-fit">
+   746→          <TabsTrigger value="CHESTS" className="gap-1.5 px-3 text-xs font-bold">
+   747→            <Gift className="h-3.5 w-3.5 text-amber-400" />
+   748→            {t('market_tab_boxes')}
+   749→          </TabsTrigger>
+   750→          {CATS.map((c) => (
+   751→            <TabsTrigger key={c} value={c} className="px-3 text-xs font-bold">
+   752→              {t(`cat_${c}` as TKey)}
+   753→            </TabsTrigger>
+   754→          ))}
+   755→        </TabsList>
+   756→      </Tabs>
+   757→
+   758→      {/* ---------- fortune chests (first tab) ---------- */}
+   759→      {cat === 'CHESTS' && (
+   760→        <section className="mt-4 space-y-6" aria-label={t('box_title')}>
+   761→          {/* header row */}
+   762→          <div className="flex flex-wrap items-center justify-between gap-2">
+   763→            <div>
+   764→              <h2 className="text-lg font-black">
+   765→                🎁 <span className="gold-text">{t('box_title')}</span>
+   766→              </h2>
+   767→              <p className="mt-0.5 text-xs text-muted-foreground">{t('box_sub')}</p>
+   768→            </div>
+   769→            {!user && (
+   770→              <p className="text-xs text-muted-foreground">
+   771→                {t('auth_no')} <b className="text-amber-400">{t('login')} →</b>
+   772→              </p>
+   773→            )}
+   774→          </div>
+   775→
+   776→          {/* chest cards — 2 cols mobile / 5 desktop */}
+   777→          {marketLoading ? (
+   778→            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+   779→              {Array.from({ length: 5 }).map((_, i) => (
+   780→                <div key={i} className="royal-card flex flex-col items-center gap-3 rounded-2xl p-4">
+   781→                  <Skeleton className="h-28 w-28 rounded-2xl" />
+   782→                  <Skeleton className="h-3.5 w-16" />
+   783→                  <Skeleton className="h-4 w-20" />
+   784→                  <Skeleton className="h-11 w-full" />
+   785→                </div>
+   786→              ))}
+   787→            </div>
+   788→          ) : boxes.length === 0 ? (
+   789→            <p className="py-10 text-center text-sm text-muted-foreground">—</p>
+   790→          ) : (
+   791→            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+   792→              {boxes.map((b, i) => {
+   793→                const meta = RARITY_META[b.rarity];
+   794→                const totalW = b.drops.reduce((s, d) => s + d.weight, 0);
+   795→                const afford = !!user && coins >= b.price;
+   796→                return (
+   797→                  <motion.div
+   798→                    key={b.code}
+   799→                    initial={{ opacity: 0, y: 16 }}
+   800→                    animate={{ opacity: 1, y: 0 }}
+   801→                    transition={{ delay: i * 0.06, duration: 0.35, ease: 'easeOut' }}
+   802→                    className="royal-card card-shine relative flex flex-col items-center gap-2 rounded-2xl p-3 text-center transition-transform hover:scale-[1.02]"
+   803→                    style={{ borderColor: `${meta.color}44` }}
+   804→                  >
+   805→                    <ChestArt image={b.image} rarity={b.rarity} size={116} />
+   806→
+   807→                    <Badge
+   808→                      variant="outline"
+   809→                      className="text-[9px] font-black"
+   810→                      style={{ color: meta.color, borderColor: `${meta.color}55`, background: `${meta.color}14` }}
+   811→                    >
+   812→                      {t(`rarity_${b.rarity}` as TKey)}
+   813→                    </Badge>
+   814→
+   815→                    <div className="flex w-full items-center justify-center gap-1.5">
+   816→                      <span className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-400/10 px-2.5 py-1 text-xs font-black text-amber-400">
+   817→                        🪙 {localizeDigits(b.price, locale)}
+   818→                      </span>
+   819→                      <button
+   820→                        type="button"
+   821→                        onClick={() => {
+   822→                          sfx.click();
+   823→                          setOddsFor(oddsFor === b.code ? null : b.code);
+   824→                        }}
+   825→                        aria-label={t('box_odds')}
+   826→                        aria-expanded={oddsFor === b.code}
+   827→                        className="pressable grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-muted-foreground transition-colors hover:text-foreground"
+   828→                      >
+   829→                        {oddsFor === b.code ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+   830→                      </button>
+   831→                    </div>
+   832→
+   833→                    {/* odds panel (client-side weight math, sorted desc) */}
+   834→                    <AnimatePresence initial={false}>
+   835→                      {oddsFor === b.code && (
+   836→                        <motion.div
+   837→                          key="odds"
+   838→                          initial={{ height: 0, opacity: 0 }}
+   839→                          animate={{ height: 'auto', opacity: 1 }}
+   840→                          exit={{ height: 0, opacity: 0 }}
+   841→                          transition={{ duration: 0.28, ease: 'easeOut' }}
+   842→                          className="w-full overflow-hidden"
+   843→                        >
+   844→                          <div className="w-full rounded-xl border border-white/10 bg-black/30 p-2 text-start">
+   845→                            <div className="mb-1 px-1 text-[10px] font-black uppercase tracking-wide text-muted-foreground">{t('box_odds')}</div>
+   846→                            <ul className="space-y-1">
+   847→                              {b.drops
+   848→                                .map((d) => ({ d, pct: totalW > 0 ? Math.round((d.weight / totalW) * 1000) / 10 : 0 }))
+   849→                                .sort((x, y) => y.pct - x.pct)
+   850→                                .map(({ d, pct }) => {
+   851→                                  const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+   852→                                  const catItem = d.kind === 'ITEM' && d.itemCode ? items.find((it) => it.code === d.itemCode) : undefined;
+   853→                                  return (
+   854→                                    <li key={d.id} className="flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-[11px]">
+   855→                                      {d.kind === 'COINS' ? (
+   856→                                        <Coins className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+   857→                                      ) : d.kind === 'XP' ? (
+   858→                                        <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+   859→                                      ) : (
+   860→                                        <Package className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+   861→                                      )}
+   862→                                      <span className="min-w-0 flex-1 truncate font-bold">
+   863→                                        {d.kind === 'ITEM'
+   864→                                          ? (catItem ? prettyName(catItem.code) : prettyName(d.itemCode ?? 'item'))
+   865→                                          : `${t(d.kind === 'COINS' ? 'gift_coins' : 'gift_xp')} +${localizeDigits(d.amount, locale)}`}
+   866→                                      </span>
+   867→                                      {catItem && (
+   868→                                        <span
+   869→                                          className="h-1.5 w-1.5 shrink-0 rounded-full"
+   870→                                          style={{ background: RARITY_META[catItem.rarity].color }}
+   871→                                          title={t(`rarity_${catItem.rarity}` as TKey)}
+   872→                                        />
+   873→                                      )}
+   874→                                      <span className="shrink-0 font-black" style={{ color: meta.color }}>
+   875→                                        {localizeDigits(pctStr, locale)}{PCT_SIGN[locale]}
+   876→                                      </span>
+   877→                                    </li>
+   878→                                  );
+   879→                                })}
+   880→                            </ul>
+   881→                          </div>
+   882→                        </motion.div>
+   883→                      )}
+   884→                    </AnimatePresence>
+   885→
+   886→                    {/* buy — play-earned coins only */}
+   887→                    <Tooltip>
+   888→                      <TooltipTrigger asChild>
+   889→                        <span className="mt-auto block w-full pt-1">
+   890→                          <Button
+   891→                            size="sm"
+   892→                            className="h-11 w-full font-black glow-gold"
+   893→                            disabled={!afford}
+   894→                            onClick={() => {
+   895→                              sfx.click();
+   896→                              setConfirmBox(b);
+   897→                            }}
+   898→                          >
+   899→                            <Gift className="h-4 w-4" />
+   900→                            {t('box_buy')}
+   901→                          </Button>
+   902→                        </span>
+   903→                      </TooltipTrigger>
+   904→                      {!user && <TooltipContent>{t('auth_no')} {t('login')} →</TooltipContent>}
+   905→                      {user && !afford && <TooltipContent>{t('not_enough')}</TooltipContent>}
+   906→                    </Tooltip>
+   907→                  </motion.div>
+   908→                );
+   909→              })}
+   910→            </div>
+   911→          )}
+   912→
+   913→          {/* my chests — unopened grants strip */}
+   914→          <section aria-label={t('box_inventory')}>
+   915→            <h3 className="mb-2 flex items-center gap-1.5 text-sm font-black">
+   916→              <PackageOpen className="h-4 w-4 text-amber-400" />
+   917→              {t('box_inventory')}
+   918→              {inventory.length > 0 && (
+   919→                <Badge variant="outline" className="border-amber-400/40 bg-amber-400/10 text-[10px] font-black text-amber-300">
+   920→                  {localizeDigits(inventory.length, locale)}
+   921→                </Badge>
+   922→              )}
+   923→            </h3>
+   924→            {inventory.length === 0 ? (
+   925→              <p className="rounded-2xl border border-dashed border-white/10 p-5 text-center text-xs text-muted-foreground">{t('box_empty')}</p>
+   926→            ) : (
+   927→              <div className="nice-scroll flex gap-2 overflow-x-auto pb-2">
+   928→                {inventory.map((g) => {
+   929→                  const gb = boxes.find((x) => x.code === g.boxCode);
+   930→                  const gMeta = RARITY_META[gb?.rarity ?? 'COMMON'];
+   931→                  const gift = g.source === 'GIFT' || g.source === 'ADMIN';
+   932→                  return (
+   933→                    <div key={g.id} className="royal-card flex shrink-0 items-center gap-2 rounded-2xl p-2 pe-3" style={{ borderColor: `${gMeta.color}44` }}>
+   934→                      <div className="relative">
+   935→                        <ChestArt image={gb?.image ?? ''} rarity={gb?.rarity ?? 'COMMON'} size={52} />
+   936→                        {gift && (
+   937→                          <span className="absolute -end-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-amber-400 text-[10px] shadow" title={g.source} aria-hidden>
+   938→                            🎁
+   939→                          </span>
+   940→                        )}
+   941→                      </div>
+   942→                      <div className="flex min-w-0 flex-col items-start gap-1">
+   943→                        <span className="text-[10px] font-black" style={{ color: gMeta.color }}>
+   944→                          {t(`rarity_${gb?.rarity ?? 'COMMON'}` as TKey)}
+   945→                        </span>
+   946→                        <Button size="sm" className="h-11 px-4 font-black glow-gold" disabled={!gb} onClick={() => gb && startOpen(g)}>
+   947→                          <PackageOpen className="h-4 w-4" />
+   948→                          {t('box_open')}
+   949→                        </Button>
+   950→                      </div>
+   951→                    </div>
+   952→                  );
+   953→                })}
+   954→              </div>
+   955→            )}
+   956→          </section>
+   957→
+   958→          {/* brand law: chests are bought ONLY with play-earned coins — no real money, ever */}
+   959→          <p className="flex items-start gap-1.5 text-[11px] leading-5 text-muted-foreground">
+   960→            <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden />
+   961→            <span>
+   962→              <span dir="rtl" className="block">
+   963→                سکه‌ها فقط از راه بازی، دستاورد و رویدادها به‌دست می‌آیند — خرید واقعی وجود ندارد.
+   964→              </span>
+   965→              <span dir="ltr" className="block text-start">
+   966→                Coins come only from playing, achievements and events — no real-money purchases.
+   967→              </span>
+   968→            </span>
+   969→          </p>
+   970→        </section>
+   971→      )}
+   972→
+   973→      {/* ---------- item grid ---------- */}
+   974→      {cat !== 'CHESTS' && (
+   975→      <div className="nice-scroll mt-4 max-h-[70dvh] overflow-y-auto pb-2 pe-1">
+   976→        {loading ? (
+   977→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   978→            {Array.from({ length: 8 }).map((_, i) => (
+   979→              <div key={i} className="royal-card flex flex-col items-center gap-3 rounded-2xl p-4">
+   980→                <Skeleton className="h-16 w-16 rounded-lg" />
+   981→                <Skeleton className="h-3.5 w-20" />
+   982→                <Skeleton className="h-4 w-14" />
+   983→                <Skeleton className="h-8 w-full" />
+   984→              </div>
+   985→            ))}
+   986→          </div>
+   987→        ) : shown.length === 0 ? (
+   988→          <p className="py-16 text-center text-sm text-muted-foreground">—</p>
+   989→        ) : (
+   990→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   991→            {shown.map((item) => {
+   992→              const meta = RARITY_META[item.rarity];
+   993→              const glow = item.rarity === 'EPIC' || item.rarity === 'LEGENDARY';
+   994→              const isOwned = owned.includes(item.code);
+   995→              const equipped = isEquipped(item);
+   996→              const canAfford = coins >= item.price;
+   997→              const levelOk = level >= item.requiredLevel;
+   998→              return (
+   999→                <div
+  1000→                  key={item.code}
+  1001→                  className="royal-card card-shine group relative flex flex-col items-center gap-2 rounded-2xl p-3 pt-4 text-center transition-all hover:scale-[1.02]"
+  1002→                  style={{ borderColor: `${meta.color}3a` }}
+  1003→                >
+  1004→                  {isOwned && (
+  1005→                    <Badge variant="outline" className="absolute end-2 top-2 border-emerald-500/40 bg-emerald-500/10 text-[9px] font-black text-emerald-300">
+  1006→                      {t('owned')}
+  1007→                    </Badge>
+  1008→                  )}
+  1009→                  {equipped && (
+  1010→                    <Badge variant="outline" className="absolute start-2 top-2 border-amber-400/50 bg-amber-400/15 text-[9px] font-black text-amber-300">
+  1011→                      {t('equipped')}
+  1012→                    </Badge>
+  1013→                  )}
+  1014→
+  1015→                  <div className="transition-transform group-hover:scale-105">
+  1016→                    <ItemPreview item={item} glow={glow} />
+  1017→                  </div>
+  1018→
+  1019→                  <div className="max-w-full truncate text-sm font-black">{prettyName(item.code)}</div>
+  1020→
+  1021→                  <Badge
+  1022→                    variant="outline"
+  1023→                    className="text-[9px] font-black"
+  1024→                    style={{ color: meta.color, borderColor: `${meta.color}55`, background: `${meta.color}14` }}
+  1025→                  >
+  1026→                    {t(`rarity_${item.rarity}` as TKey)}
+  1027→                  </Badge>
+  1028→
+  1029→                  <div className="text-xs font-black">
+  1030→                    {item.price === 0 ? (
+  1031→                      <span className="text-emerald-400">FREE</span>
+  1032→                    ) : (
+  1033→                      <span className="text-amber-400">🪙 {localizeDigits(item.price, locale)}</span>
+  1034→                    )}
+  1035→                  </div>
+  1036→
+  1037→                  <div className="mt-auto w-full pt-1">
+  1038→                    {isOwned ? (
+  1039→                      equipped ? (
+  1040→                        <Button
+  1041→                          size="sm"
+  1042→                          variant="outline"
+  1043→                          disabled
+  1044→                          className="w-full border-amber-400/50 bg-amber-400/10 font-black text-amber-300"
+  1045→                        >
+  1046→                          ✓ {t('equipped')}
+  1047→                        </Button>
+  1048→                      ) : (
+  1049→                        <Button size="sm" className="w-full font-black" onClick={() => void doEquip(item)}>
+  1050→                          {t('equip')}
+  1051→                        </Button>
+  1052→                      )
+  1053→                    ) : !levelOk ? (
+  1054→                      <Tooltip>
+  1055→                        <TooltipTrigger asChild>
+  1056→                          <span className="block w-full cursor-not-allowed">
+  1057→                            <Button size="sm" variant="secondary" disabled className="w-full">
+  1058→                              🔒 {t('locked')}
+  1059→                            </Button>
+  1060→                          </span>
+  1061→                        </TooltipTrigger>
+  1062→                        <TooltipContent>
+  1063→                          {t('need_level')} {localizeDigits(item.requiredLevel, locale)}
+  1064→                        </TooltipContent>
+  1065→                      </Tooltip>
+  1066→                    ) : (
+  1067→                      <Tooltip>
+  1068→                        <TooltipTrigger asChild>
+  1069→                          <span className="block w-full">
+  1070→                            <Button
+  1071→                              size="sm"
+  1072→                              className="w-full glow-gold font-black"
+  1073→                              disabled={!canAfford || busyBuy === item.code}
+  1074→                              onClick={() => setConfirmItem(item)}
+  1075→                            >
+  1076→                              {busyBuy === item.code ? '…' : t('buy')}
+  1077→                            </Button>
+  1078→                          </span>
+  1079→                        </TooltipTrigger>
+  1080→                        {!canAfford && <TooltipContent>{t('not_enough')}</TooltipContent>}
+  1081→                      </Tooltip>
+  1082→                    )}
+  1083→                  </div>
+  1084→                </div>
+  1085→              );
+  1086→            })}
+  1087→          </div>
+  1088→        )}
+  1089→      </div>
+  1090→      )}
+  1091→
+  1092→      {/* ---------- chest buy confirm ---------- */}
+  1093→      <AlertDialog open={!!confirmBox} onOpenChange={(o) => !o && setConfirmBox(null)}>
+  1094→        <AlertDialogContent className="royal-card">
+  1095→          <AlertDialogHeader>
+  1096→            <AlertDialogTitle className="gold-text">{t('box_buy')}</AlertDialogTitle>
+  1097→            <AlertDialogDescription asChild>
+  1098→              <div>
+  1099→                {confirmBox && (
+  1100→                  <span className="flex flex-wrap items-center gap-2">
+  1101→                    <b className="text-foreground">
+  1102→                      {t('gift_box')} · {t(`rarity_${confirmBox.rarity}` as TKey)}
+  1103→                    </b>
+  1104→                    <span className="font-bold text-amber-400">🪙 {localizeDigits(confirmBox.price, locale)}</span>
+  1105→                    <span>
+  1106→                      {t('coins')}: {localizeDigits(coins, locale)}
+  1107→                    </span>
+  1108→                  </span>
+  1109→                )}
+  1110→              </div>
+  1111→            </AlertDialogDescription>
+  1112→          </AlertDialogHeader>
+  1113→          <AlertDialogFooter>
+  1114→            <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+  1115→            <AlertDialogAction className="glow-gold" disabled={busyBox} onClick={() => void doBuyBox()}>
+  1116→              {busyBox ? '…' : t('confirm')}
+  1117→            </AlertDialogAction>
+  1118→          </AlertDialogFooter>
+  1119→        </AlertDialogContent>
+  1120→      </AlertDialog>
+  1121→
+  1122→      {/* ---------- chest opening experience (suspense → reveal) ---------- */}
+  1123→      <Dialog
+  1124→        open={!!opening}
+  1125→        onOpenChange={(o) => {
+  1126→          if (!o) closeOpening();
+  1127→        }}
+  1128→      >
+  1129→        <DialogContent
+  1130→          showCloseButton={false}
+  1131→          className="w-[calc(100%-2rem)] max-w-md overflow-hidden rounded-3xl border border-white/10 bg-[#07070f]/95 p-6 text-center shadow-2xl backdrop-blur-xl"
+  1132→        >
+  1133→          {opening && (
+  1134→            <>
+  1135→              <DialogTitle className="sr-only">
+  1136→                {t('box_title')} — {t(`rarity_${opening.box.rarity}` as TKey)}
+  1137→              </DialogTitle>
+  1138→              <DialogDescription className="sr-only">{t('box_opening_anim')}</DialogDescription>
+  1139→
+  1140→              <div className="relative flex min-h-[320px] flex-col items-center justify-center">
+  1141→                <AnimatePresence mode="wait" initial={false}>
+  1142→                  {openPhase === 'shake' ? (
+  1143→                    <motion.div key="shake" className="flex flex-col items-center" exit={{ opacity: 0, scale: 1.15 }} transition={{ duration: 0.18 }}>
+  1144→                      {/* escalating wiggle while the server rolls */}
+  1145→                      <motion.div
+  1146→                        animate={{ rotate: [0, -3, 3, -6, 6, -9, 9, -12, 12, 0], scale: [1, 1.03, 1, 1.05, 1, 1.07, 1] }}
+  1147→                        transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
+  1148→                      >
+  1149→                        <ChestArt image={opening.box.image} rarity={opening.box.rarity} size={190} />
+  1150→                      </motion.div>
+  1151→                      <motion.p
+  1152→                        className="mt-6 text-sm font-black text-amber-300"
+  1153→                        animate={{ opacity: [0.45, 1, 0.45] }}
+  1154→                        transition={{ duration: 1.1, repeat: Infinity }}
+  1155→                      >
+  1156→                        {t('box_opening_anim')}
+  1157→                      </motion.p>
+  1158→                    </motion.div>
+  1159→                  ) : openResult ? (
+  1160→                    <RevealContent
+  1161→                      key={`reveal-${revealSeed}`}
+  1162→                      result={openResult}
+  1163→                      box={opening.box}
+  1164→                      catalog={items}
+  1165→                      remaining={remainingAfterOpen}
+  1166→                      seed={revealSeed}
+  1167→                      t={t}
+  1168→                      locale={locale}
+  1169→                      onAnother={openAnother}
+  1170→                      onClose={closeOpening}
+  1171→                    />
+  1172→                  ) : null}
+  1173→                </AnimatePresence>
+  1174→              </div>
+  1175→            </>
+  1176→          )}
+  1177→        </DialogContent>
+  1178→      </Dialog>
+  1179→
+  1180→      {/* ULTIMATE screen flash */}
+  1181→      {flash && (
+  1182→        <motion.div
+  1183→          className="pointer-events-none fixed inset-0 z-[70] bg-white"
+  1184→          initial={{ opacity: 0.9 }}
+  1185→          animate={{ opacity: 0 }}
+  1186→          transition={{ duration: 0.2, ease: 'easeOut' }}
+  1187→          aria-hidden
+  1188→        />
+  1189→      )}
+  1190→
+  1191→      {/* ---------- buy confirm dialog ---------- */}
+  1192→      <AlertDialog open={!!confirmItem} onOpenChange={(o) => !o && setConfirmItem(null)}>
+  1193→        <AlertDialogContent className="royal-card">
+  1194→          <AlertDialogHeader>
+  1195→            <AlertDialogTitle className="gold-text">{t('buy_confirm')}</AlertDialogTitle>
+  1196→            <AlertDialogDescription asChild>
+  1197→              <div>
+  1198→                {confirmItem && (
+  1199→                  <span className="flex flex-wrap items-center gap-2">
+  1200→                    <b className="text-foreground">{prettyName(confirmItem.code)}</b>
+  1201→                    <span className="font-bold text-amber-400">🪙 {localizeDigits(confirmItem.price, locale)}</span>
+  1202→                    <span>
+  1203→                      {t('coins')}: {localizeDigits(coins, locale)}
+  1204→                    </span>
+  1205→                  </span>
+  1206→                )}
+  1207→              </div>
+  1208→            </AlertDialogDescription>
+  1209→          </AlertDialogHeader>
+  1210→          <AlertDialogFooter>
+  1211→            <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+  1212→            <AlertDialogAction className="glow-gold" onClick={() => void doBuy()}>
+  1213→              {t('confirm')}
+  1214→            </AlertDialogAction>
+  1215→          </AlertDialogFooter>
+  1216→        </AlertDialogContent>
+  1217→      </AlertDialog>
+  1218→    </div>
+  1219→  );
+  1220→}
+  1221→

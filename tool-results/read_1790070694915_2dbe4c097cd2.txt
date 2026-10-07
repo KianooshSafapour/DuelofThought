@@ -1,0 +1,802 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * MindTankGame — "Mind Tank" (تانک اندیشه)
+     5→     5→ *
+     6→     6→ * A modernized, family-friendly homage to Think Tank (2000) by The Code Zone:
+     7→     7→ * one elegant amber tank versus ten "rogue duelist drones" with escalating
+     8→     8→ * firepower and intelligence (waves of 2 / 2 / 3 / 3). Signature mechanic:
+     9→     9→ * your glowing logic pulses bounce off walls TWICE — bank shots are the art
+    10→    10→ * of the duel. Drone plasma does not bounce. No blood, no humans: deactivated
+    11→    11→ * drones spark and power down. Includes insight-cell pickups (shield / rapid
+    12→    12→ * / repair), 4 rotating neon arenas, wave banners, a DOM HUD, pause, and the
+    13→    13→ * shared arcade economy (useArcadeFinish('mazemind')).
+    14→    14→ *
+    15→    15→ * Controls — desktop: WASD/arrows move, mouse aims, click/Space fires, Esc
+    16→    16→ * pauses. Touch: left half of the arena = floating move stick, right half =
+    17→    17→ * drag to aim & fire, plus an auto-aim fire button. Both schemes are live at
+    18→    18→ * once; keyboard-only players get a lead-predicting auto-aim turret.
+    19→    19→ */
+    20→    20→
+    21→    21→import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
+    22→    22→import { useApp } from '@/store/app';
+    23→    23→import { localizeDigits } from '@/lib/i18n';
+    24→    24→import { sfx } from '@/lib/sound';
+    25→    25→import { useArcadeFinish, ArcadeResultModal } from '@/lib/arcade-client';
+    26→    26→import { Button } from '@/components/ui/button';
+    27→    27→import { Brain, Crosshair, Heart, Move, Pause, Play, Shield, Trophy, X, Zap } from 'lucide-react';
+    28→    28→import { MM_ARENA_H, MM_ARENA_W, mmArenaForWave, type MMWall } from '@/lib/game/mazemind-arenas';
+    29→    29→
+    30→    30→/* ============================== tuning ================================= */
+    31→    31→/* All speeds are "frame units" at the 60 fps reference step (step = dt/16.67). */
+    32→    32→
+    33→    33→const ARENA_W = MM_ARENA_W;
+    34→    34→const ARENA_H = MM_ARENA_H;
+    35→    35→const PAD = 16; // arena boundary inset
+    36→    36→
+    37→    37→const PLAYER_R = 13;
+    38→    38→const PLAYER_SPEED = 3.3; // ≈198 px/s — always at least as fast as any single drone
+    39→    39→const PULSE_SPEED = 7.4; // logic pulse
+    40→    40→const PULSE_R = 5;
+    41→    41→const PULSE_LIFE = 3800; // ms
+    42→    42→const PULSE_BOUNCES = 2; // the signature: bank twice, third wall contact fizzles
+    43→    43→const DRONE_R = 15;
+    44→    44→const PLASMA_R = 5.5;
+    45→    45→
+    46→    46→const FIRE_CD = 345; // ms between logic pulses
+    47→    47→const RAPID_CD = 150; // while Rapid Logic is active
+    48→    48→const INV_MS = 1600; // post-hit invulnerability
+    49→    49→const SHIELD_MS = 15000;
+    50→    50→const RAPID_MS = 10000;
+    51→    51→const PICKUP_LIFE = 12000;
+    52→    52→const PICKUP_CHANCE = 0.45;
+    53→    53→
+    54→    54→const WAVES = [2, 2, 3, 3] as const; // 10 duelist drones total
+    55→    55→const TIER_START = [1, 3, 5, 8] as const;
+    56→    56→
+    57→    57→const AGGRO = 460; // LOS sight range
+    58→    58→const FIRE_RANGE = 560;
+    59→    59→const KEEP = 235; // preferred engage distance
+    60→    60→const DODGE_RANGE = 170;
+    61→    61→const DODGE_PERP = 30; // pulse passes this close → strafe
+    62→    62→
+    63→    63→const SCORE_PICKUP = 25;
+    64→    64→const SCORE_WAVE = 100;
+    65→    65→const SCORE_PERFECT = 200;
+    66→    66→const SCORE_VICTORY = 400;
+    67→    67→
+    68→    68→const BEST_KEY = 'doi_mazemind_best';
+    69→    69→
+    70→    70→/** Per-tier drone spec — tier 1 is a gentle patrol lamp, tier 10 a duelist. */
+    71→    71→function droneSpec(tier: number) {
+    72→    72→  return {
+    73→    73→    speed: 1.5 + tier * 0.18, // t1 ≈ 102 px/s … t10 ≈ 198 px/s
+    74→    74→    fireMs: Math.max(760, 2500 - tier * 165),
+    75→    75→    plasma: 4.4 + tier * 0.34,
+    76→    76→    hp: tier <= 3 ? 1 : tier <= 7 ? 2 : 3,
+    77→    77→    lead: tier < 4 ? 0 : Math.min(1, (tier - 3) * 0.15), // shot lead prediction
+    78→    78→    aimMs: Math.max(280, 640 - tier * 38), // telegraphed wind-up before firing
+    79→    79→    dodge: tier >= 6, // strafes when your pulse is about to connect
+    80→    80→  };
+    81→    81→}
+    82→    82→
+    83→    83→const DRONE_COLORS = ['#a3e635', '#4ade80', '#2dd4bf', '#38bdf8', '#818cf8', '#a78bfa', '#c084fc', '#e879f9', '#fb923c', '#f43f5e'];
+    84→    84→
+    85→    85→/* ============================== types ================================== */
+    86→    86→
+    87→    87→type Phase = 'intro' | 'playing' | 'banner' | 'waveclear' | 'paused' | 'over';
+    88→    88→type PickupKind = 'shield' | 'rapid' | 'repair';
+    89→    89→
+    90→    90→interface Pulse {
+    91→    91→  x: number; y: number; vx: number; vy: number; r: number;
+    92→    92→  life: number; bounces: number; friendly: boolean; color: string;
+    93→    93→}
+    94→    94→interface Drone {
+    95→    95→  id: number; tier: number; x: number; y: number; vx: number; vy: number;
+    96→    96→  hp: number; maxHp: number; state: 'spawn' | 'patrol' | 'chase' | 'aim';
+    97→    97→  spawnT: number; fireT: number; aimT: number; losLost: number;
+    98→    98→  bodyAng: number; gunAng: number; wp: { x: number; y: number };
+    99→    99→  orbitDir: number; dodgeT: number; dodgeAng: number; flashT: number; spin: number;
+   100→   100→}
+   101→   101→interface Pickup { id: number; x: number; y: number; kind: PickupKind; t: number; life: number }
+   102→   102→interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; c: string; r: number }
+   103→   103→interface Pop { x: number; y: number; txt: string; c: string; life: number; max: number }
+   104→   104→
+   105→   105→interface Game {
+   106→   106→  phase: Phase;
+   107→   107→  walls: MMWall[];
+   108→   108→  wave: number; robotsDown: number; score: number; hearts: number;
+   109→   109→  shots: number; hits: number; hitThisWave: boolean;
+   110→   110→  bannerT: number; nextWaveT: number; pendingVictory: boolean;
+   111→   111→  px: number; py: number; pvx: number; pvy: number;
+   112→   112→  hullAng: number; gunAng: number;
+   113→   113→  fireT: number; invT: number; shield: number; rapid: number; shake: number;
+   114→   114→  keys: Set<string>;
+   115→   115→  aim: { x: number; y: number }; aimMode: 'mouse' | 'manual' | 'auto';
+   116→   116→  stick: { active: boolean; id: number; ox: number; oy: number; dx: number; dy: number };
+   117→   117→  drones: Drone[]; pulses: Pulse[]; pickups: Pickup[]; parts: Part[]; pops: Pop[];
+   118→   118→  time: number;
+   119→   119→}
+   120→   120→
+   121→   121→/* ============================ math helpers ============================= */
+   122→   122→
+   123→   123→const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+   124→   124→
+   125→   125→function angLerp(a: number, b: number, k: number) {
+   126→   126→  const d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+   127→   127→  return a + d * k;
+   128→   128→}
+   129→   129→
+   130→   130→/** Circle vs axis-aligned rect: push-out normal + penetration (null = miss). */
+   131→   131→function circleRect(px: number, py: number, r: number, w: MMWall) {
+   132→   132→  const cx = clamp(px, w.x, w.x + w.w);
+   133→   133→  const cy = clamp(py, w.y, w.y + w.h);
+   134→   134→  const dx = px - cx;
+   135→   135→  const dy = py - cy;
+   136→   136→  const d2 = dx * dx + dy * dy;
+   137→   137→  if (d2 >= r * r) return null;
+   138→   138→  if (d2 > 1e-6) {
+   139→   139→    const d = Math.sqrt(d2);
+   140→   140→    return { nx: dx / d, ny: dy / d, pen: r - d };
+   141→   141→  }
+   142→   142→  const l = px - w.x;
+   143→   143→  const rt = w.x + w.w - px;
+   144→   144→  const t = py - w.y;
+   145→   145→  const b = w.y + w.h - py;
+   146→   146→  const m = Math.min(l, rt, t, b);
+   147→   147→  if (m === l) return { nx: -1, ny: 0, pen: r + l };
+   148→   148→  if (m === rt) return { nx: 1, ny: 0, pen: r + rt };
+   149→   149→  if (m === t) return { nx: 0, ny: -1, pen: r + t };
+   150→   150→  return { nx: 0, ny: 1, pen: r + b };
+   151→   151→}
+   152→   152→
+   153→   153→/** Liang–Barsky segment vs AABB — used for drone line-of-sight. */
+   154→   154→function segHitsRect(x1: number, y1: number, x2: number, y2: number, w: MMWall) {
+   155→   155→  let t0 = 0;
+   156→   156→  let t1 = 1;
+   157→   157→  const dx = x2 - x1;
+   158→   158→  const dy = y2 - y1;
+   159→   159→  const p = [-dx, dx, -dy, dy];
+   160→   160→  const q = [x1 - w.x, w.x + w.w - x1, y1 - w.y, w.y + w.h - y1];
+   161→   161→  for (let i = 0; i < 4; i++) {
+   162→   162→    if (p[i] === 0) {
+   163→   163→      if (q[i] < 0) return false;
+   164→   164→      continue;
+   165→   165→    }
+   166→   166→    const r = q[i] / p[i];
+   167→   167→    if (p[i] < 0) {
+   168→   168→      if (r > t1) return false;
+   169→   169→      if (r > t0) t0 = r;
+   170→   170→    } else {
+   171→   171→      if (r < t0) return false;
+   172→   172→      if (r < t1) t1 = r;
+   173→   173→    }
+   174→   174→  }
+   175→   175→  return true;
+   176→   176→}
+   177→   177→
+   178→   178→function hasLOS(x1: number, y1: number, x2: number, y2: number, walls: MMWall[]) {
+   179→   179→  for (const w of walls) if (segHitsRect(x1, y1, x2, y2, w)) return false;
+   180→   180→  return true;
+   181→   181→}
+   182→   182→
+   183→   183→function pointFree(x: number, y: number, r: number, walls: MMWall[]) {
+   184→   184→  for (const w of walls) if (circleRect(x, y, r, w)) return false;
+   185→   185→  return true;
+   186→   186→}
+   187→   187→
+   188→   188→/** Push a circle body out of every wall; damp velocity into surfaces (e = bounce). */
+   189→   189→function resolveWalls(x: number, y: number, r: number, vx: number, vy: number, e: number, walls: MMWall[]) {
+   190→   190→  for (const w of walls) {
+   191→   191→    const c = circleRect(x, y, r, w);
+   192→   192→    if (!c) continue;
+   193→   193→    x += c.nx * c.pen;
+   194→   194→    y += c.ny * c.pen;
+   195→   195→    const vn = vx * c.nx + vy * c.ny;
+   196→   196→    if (vn < 0) {
+   197→   197→      vx -= (1 + e) * vn * c.nx;
+   198→   198→      vy -= (1 + e) * vn * c.ny;
+   199→   199→    }
+   200→   200→  }
+   201→   201→  return { x, y, vx, vy };
+   202→   202→}
+   203→   203→
+   204→   204→/** Keep a body inside the arena frame; e = 1 gives a clean pulse bounce. */
+   205→   205→function resolveBounds(x: number, y: number, r: number, vx: number, vy: number, e: number) {
+   206→   206→  let hit = false;
+   207→   207→  if (x < PAD + r) { x = PAD + r; if (vx < 0) { vx = -vx * e; hit = true; } }
+   208→   208→  if (x > ARENA_W - PAD - r) { x = ARENA_W - PAD - r; if (vx > 0) { vx = -vx * e; hit = true; } }
+   209→   209→  if (y < PAD + r) { y = PAD + r; if (vy < 0) { vy = -vy * e; hit = true; } }
+   210→   210→  if (y > ARENA_H - PAD - r) { y = ARENA_H - PAD - r; if (vy > 0) { vy = -vy * e; hit = true; } }
+   211→   211→  return { x, y, vx, vy, hit };
+   212→   212→}
+   213→   213→
+   214→   214→/** Intercept angle at a moving target for a projectile of `speed` (per frame). */
+   215→   215→function interceptAngle(sx: number, sy: number, tx: number, ty: number, tvx: number, tvy: number, speed: number) {
+   216→   216→  const dx = tx - sx;
+   217→   217→  const dy = ty - sy;
+   218→   218→  const a = tvx * tvx + tvy * tvy - speed * speed;
+   219→   219→  const b = 2 * (dx * tvx + dy * tvy);
+   220→   220→  const c = dx * dx + dy * dy;
+   221→   221→  let t = -1;
+   222→   222→  if (Math.abs(a) < 1e-4) {
+   223→   223→    if (Math.abs(b) > 1e-4) t = -c / b;
+   224→   224→  } else {
+   225→   225→    const disc = b * b - 4 * a * c;
+   226→   226→    if (disc >= 0) {
+   227→   227→      const sq = Math.sqrt(disc);
+   228→   228→      const t1 = (-b - sq) / (2 * a);
+   229→   229→      const t2 = (-b + sq) / (2 * a);
+   230→   230→      t = Math.min(t1, t2);
+   231→   231→      if (t < 0) t = Math.max(t1, t2);
+   232→   232→    }
+   233→   233→  }
+   234→   234→  if (!Number.isFinite(t) || t < 0) t = Math.hypot(dx, dy) / speed;
+   235→   235→  t = Math.min(t, 400); // sanity bound; real intercepts are far below this
+   236→   236→  return Math.atan2(dy + tvy * t, dx + tvx * t);
+   237→   237→}
+   238→   238→
+   239→   239→function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+   240→   240→  const rad = Math.min(r, w / 2, h / 2);
+   241→   241→  ctx.beginPath();
+   242→   242→  ctx.moveTo(x + rad, y);
+   243→   243→  ctx.arcTo(x + w, y, x + w, y + h, rad);
+   244→   244→  ctx.arcTo(x + w, y + h, x, y + h, rad);
+   245→   245→  ctx.arcTo(x, y + h, x, y, rad);
+   246→   246→  ctx.arcTo(x, y, x + w, y, rad);
+   247→   247→  ctx.closePath();
+   248→   248→}
+   249→   249→
+   250→   250→/* ============================== styling ================================ */
+   251→   251→
+   252→   252→const MT_CSS = `
+   253→   253→.mt-shell{background:
+   254→   254→  radial-gradient(110% 80% at 50% -10%, rgba(251,191,36,.08), transparent 55%),
+   255→   255→  radial-gradient(130% 110% at 50% 115%, rgba(56,189,248,.10), transparent 60%),
+   256→   256→  linear-gradient(180deg,#0a0f1e 0%,#070b16 55%,#050810 100%);}
+   257→   257→.mt-banner{animation:mt-banner 1.55s cubic-bezier(.2,1.3,.4,1) both;}
+   258→   258→@keyframes mt-banner{0%{opacity:0;transform:scale(.55)}18%{opacity:1;transform:scale(1.08)}30%{transform:scale(1)}82%{opacity:1}100%{opacity:0;transform:scale(1.05)}}
+   259→   259→.mt-pulse{animation:mt-pulse 1.6s ease-in-out infinite;}
+   260→   260→@keyframes mt-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+   261→   261→@media (prefers-reduced-motion:reduce){.mt-banner{animation:mt-fade .4s ease both}.mt-pulse{animation:none}}
+   262→   262→@keyframes mt-fade{from{opacity:0}to{opacity:1}}
+   263→   263→`;
+   264→   264→
+   265→   265→/* ============================ component ================================ */
+   266→   266→
+   267→   267→export function MindTankGame({ onExit }: { onExit: () => void }) {
+   268→   268→  const { t, locale } = useApp();
+   269→   269→  const rtl = locale === 'fa' || locale === 'ar';
+   270→   270→
+   271→   271→  const { finish, rewards, lastScore, open: resultOpen, close: closeResult } = useArcadeFinish('mazemind');
+   272→   272→
+   273→   273→  /* ---- React mirrors of the game (HUD-only; sim lives in refs) ---- */
+   274→   274→  const [phase, setPhase] = useState<Phase>('intro');
+   275→   275→  const [score, setScore] = useState(0);
+   276→   276→  const [hearts, setHearts] = useState(3);
+   277→   277→  const [wave, setWave] = useState(1);
+   278→   278→  const [robotsDown, setRobotsDown] = useState(0);
+   279→   279→  const [pow, setPow] = useState({ s: 0, r: 0 });
+   280→   280→  const [banner, setBanner] = useState<{ text: string; sub?: string; key: number } | null>(null);
+   281→   281→  const [runBest, setRunBest] = useState(0);
+   282→   282→  const [summary, setSummary] = useState({ robotsDown: 0, wave: 1, acc: 0 });
+   283→   283→
+   284→   284→  const gRef = useRef<Game | null>(null);
+   285→   285→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   286→   286→  const viewRef = useRef({ cssW: 640 });
+   287→   287→  const fireMouseRef = useRef(false);
+   288→   288→  const fireKeyRef = useRef(false);
+   289→   289→  const fireBtnRef = useRef(false);
+   290→   290→  const fireTouchRef = useRef(false);
+   291→   291→  const fireTouchId = useRef(-1);
+   292→   292→  const timersRef = useRef<number[]>([]);
+   293→   293→  const idRef = useRef(1);
+   294→   294→  const submittedRef = useRef(false);
+   295→   295→  const finishRef = useRef(finish);
+   296→   296→  const closeResultRef = useRef(closeResult);
+   297→   297→  const bannerKeyRef = useRef(1);
+   298→   298→
+   299→   299→  useEffect(() => {
+   300→   300→    finishRef.current = finish;
+   301→   301→    closeResultRef.current = closeResult;
+   302→   302→  });
+   303→   303→
+   304→   304→  /* ---- local best (persisted per device; external store keeps lint happy) ---- */
+   305→   305→  const storedBest = useSyncExternalStore(
+   306→   306→    () => () => undefined,
+   307→   307→    () => {
+   308→   308→      try {
+   309→   309→        return Number(localStorage.getItem(BEST_KEY) || '0') || 0;
+   310→   310→      } catch { return 0; }
+   311→   311→    },
+   312→   312→    () => 0,
+   313→   313→  );
+   314→   314→  const best = Math.max(storedBest, runBest);
+   315→   315→
+   316→   316→  const addTimer = (id: number) => timersRef.current.push(id);
+   317→   317→
+   318→   318→  /* ---- HUD helpers callable from inside the single-run loop effect ---- */
+   319→   319→  const showBanner = useCallback((text: string, sub?: string) => {
+   320→   320→    bannerKeyRef.current += 1;
+   321→   321→    setBanner({ text, sub, key: bannerKeyRef.current });
+   322→   322→  }, []);
+   323→   323→
+   324→   324→  /* ---- fresh run (Start / Again) ---- */
+   325→   325→  const startRun = useCallback(() => {
+   326→   326→    for (const id of timersRef.current) window.clearTimeout(id);
+   327→   327→    timersRef.current = [];
+   328→   328→    submittedRef.current = false;
+   329→   329→    const arena = mmArenaForWave(1);
+   330→   330→    const { t: tt, locale: lc } = useApp.getState();
+   331→   331→    gRef.current = {
+   332→   332→      phase: 'banner',
+   333→   333→      walls: arena.walls,
+   334→   334→      wave: 1, robotsDown: 0, score: 0, hearts: 3,
+   335→   335→      shots: 0, hits: 0, hitThisWave: false,
+   336→   336→      bannerT: 1500, nextWaveT: 0, pendingVictory: false,
+   337→   337→      px: arena.playerSpawn.x, py: arena.playerSpawn.y, pvx: 0, pvy: 0,
+   338→   338→      hullAng: -Math.PI / 2, gunAng: 0,
+   339→   339→      fireT: 0, invT: 0, shield: 0, rapid: 0, shake: 0,
+   340→   340→      keys: new Set<string>(),
+   341→   341→      aim: { x: ARENA_W / 2, y: 40 }, aimMode: 'auto',
+   342→   342→      stick: { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 },
+   343→   343→      drones: [], pulses: [], pickups: [], parts: [], pops: [],
+   344→   344→      time: 0,
+   345→   345→    };
+   346→   346→    fireTouchId.current = -1;
+   347→   347→    fireMouseRef.current = false;
+   348→   348→    fireKeyRef.current = false;
+   349→   349→    fireBtnRef.current = false;
+   350→   350→    fireTouchRef.current = false;
+   351→   351→    idRef.current = 1;
+   352→   352→    setPhase('banner');
+   353→   353→    setScore(0);
+   354→   354→    setHearts(3);
+   355→   355→    setWave(1);
+   356→   356→    setRobotsDown(0);
+   357→   357→    setPow({ s: 0, r: 0 });
+   358→   358→    showBanner(`${tt('mazemind_wave')} ${localizeDigits(1, lc)}`, tt('mazemind_start'));
+   359→   359→    closeResultRef.current();
+   360→   360→  }, [showBanner]);
+   361→   361→
+   362→   362→  /* ---- wave starter: rotate arena, lay drones ---- */
+   363→   363→  const startWave = useCallback(() => {
+   364→   364→    const g = gRef.current;
+   365→   365→    if (!g) return;
+   366→   366→    const arena = mmArenaForWave(g.wave);
+   367→   367→    g.walls = arena.walls;
+   368→   368→    g.pulses = [];
+   369→   369→    g.pickups = [];
+   370→   370→    g.hitThisWave = false;
+   371→   371→    if (!pointFree(g.px, g.py, PLAYER_R + 4, g.walls)) {
+   372→   372→      g.px = arena.playerSpawn.x;
+   373→   373→      g.py = arena.playerSpawn.y;
+   374→   374→      g.pvx = 0;
+   375→   375→      g.pvy = 0;
+   376→   376→    }
+   377→   377→    const n = WAVES[g.wave - 1];
+   378→   378→    const tier0 = TIER_START[g.wave - 1];
+   379→   379→    const spots = [...arena.droneSpawns].sort(() => Math.random() - 0.5);
+   380→   380→    const drones: Drone[] = [];
+   381→   381→    for (let i = 0; i < n; i++) {
+   382→   382→      const spec = droneSpec(tier0 + i);
+   383→   383→      let spot = spots[i % spots.length];
+   384→   384→      if (Math.hypot(spot.x - g.px, spot.y - g.py) < 240) {
+   385→   385→        const far = spots.find((s) => Math.hypot(s.x - g.px, s.y - g.py) >= 240);
+   386→   386→        if (far) spot = far;
+   387→   387→      }
+   388→   388→      drones.push({
+   389→   389→        id: idRef.current++, tier: tier0 + i, x: spot.x, y: spot.y, vx: 0, vy: 0,
+   390→   390→        hp: spec.hp, maxHp: spec.hp, state: 'spawn',
+   391→   391→        spawnT: 650 + i * 180, fireT: spec.fireMs * (0.7 + Math.random() * 0.6),
+   392→   392→        aimT: 0, losLost: 0,
+   393→   393→        bodyAng: Math.random() * Math.PI * 2,
+   394→   394→        gunAng: Math.atan2(g.py - spot.y, g.px - spot.x),
+   395→   395→        wp: { x: spot.x, y: spot.y },
+   396→   396→        orbitDir: Math.random() < 0.5 ? 1 : -1,
+   397→   397→        dodgeT: 0, dodgeAng: 0, flashT: 0, spin: Math.random() * Math.PI * 2,
+   398→   398→      });
+   399→   399→    }
+   400→   400→    g.drones = drones;
+   401→   401→    g.phase = 'playing';
+   402→   402→    setPhase('playing');
+   403→   403→  }, []);
+   404→   404→
+   405→   405→  /* ---- run end: submit to the shared arcade economy ---- */
+   406→   406→  const endRun = useCallback((victory: boolean) => {
+   407→   407→    if (submittedRef.current) return;
+   408→   408→    submittedRef.current = true;
+   409→   409→    const g = gRef.current;
+   410→   410→    if (!g) return;
+   411→   411→    g.phase = 'over';
+   412→   412→    setPhase('over');
+   413→   413→    const acc = g.shots > 0 ? Math.round((g.hits / g.shots) * 100) : 0;
+   414→   414→    let stored = 0;
+   415→   415→    try { stored = Number(localStorage.getItem(BEST_KEY) || '0') || 0; } catch { /* noop */ }
+   416→   416→    if (g.score > stored) {
+   417→   417→      setRunBest(g.score);
+   418→   418→      try { localStorage.setItem(BEST_KEY, String(g.score)); } catch { /* noop */ }
+   419→   419→    }
+   420→   420→    setSummary({ robotsDown: g.robotsDown, wave: g.wave, acc });
+   421→   421→    if (victory) sfx.win();
+   422→   422→    else sfx.lose();
+   423→   423→    const finalScore = g.score;
+   424→   424→    const meta = { robotsDown: g.robotsDown, wave: g.wave, accuracy: acc };
+   425→   425→    addTimer(window.setTimeout(() => { void finishRef.current(finalScore, meta); }, victory ? 950 : 700));
+   426→   426→  }, []);
+   427→   427→
+   428→   428→  /* ---- pause ---- */
+   429→   429→  const togglePause = useCallback(() => {
+   430→   430→    const g = gRef.current;
+   431→   431→    if (!g) return;
+   432→   432→    if (g.phase === 'playing') {
+   433→   433→      g.phase = 'paused';
+   434→   434→      setPhase('paused');
+   435→   435→      sfx.click();
+   436→   436→    } else if (g.phase === 'paused') {
+   437→   437→      g.phase = 'playing';
+   438→   438→      setPhase('playing');
+   439→   439→      sfx.click();
+   440→   440→    }
+   441→   441→  }, []);
+   442→   442→
+   443→   443→  /* ====================== the simulation / render loop ==================== */
+   444→   444→  useEffect(() => {
+   445→   445→    const canvas = canvasRef.current;
+   446→   446→    if (!canvas) return;
+   447→   447→    const ctx = canvas.getContext('2d');
+   448→   448→    if (!ctx) return;
+   449→   449→
+   450→   450→    /* ---- backing store sizing (device-pixel sharp) ---- */
+   451→   451→    const resize = () => {
+   452→   452→      const w = canvas.clientWidth || 640;
+   453→   453→      const dpr = Math.min(2, window.devicePixelRatio || 1);
+   454→   454→      canvas.width = Math.round(w * dpr);
+   455→   455→      canvas.height = Math.round(w * (ARENA_H / ARENA_W) * dpr);
+   456→   456→      viewRef.current.cssW = w;
+   457→   457→    };
+   458→   458→    resize();
+   459→   459→    const ro = new ResizeObserver(resize);
+   460→   460→    ro.observe(canvas);
+   461→   461→
+   462→   462→    /* ---- particle / popup factories ---- */
+   463→   463→    const burst = (g: Game, x: number, y: number, c: string, n: number, speed: number) => {
+   464→   464→      for (let i = 0; i < n; i++) {
+   465→   465→        const a = Math.random() * Math.PI * 2;
+   466→   466→        const v = speed * (0.25 + Math.random() * 0.95);
+   467→   467→        g.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 350 + Math.random() * 550, max: 900, c, r: 1.4 + Math.random() * 2.6 });
+   468→   468→      }
+   469→   469→      if (g.parts.length > 260) g.parts.splice(0, g.parts.length - 260);
+   470→   470→    };
+   471→   471→
+   472→   472→    const pop = (g: Game, x: number, y: number, txt: string, c: string) => {
+   473→   473→      g.pops.push({ x, y, txt, c, life: 1150, max: 1150 });
+   474→   474→    };
+   475→   475→    const dNum = (n: number) => localizeDigits(n, useApp.getState().locale);
+   476→   476→
+   477→   477→    let lastBounceSfx = 0;
+   478→   478→
+   479→   479→    /* ---- drone deactivate: spark-down + score + maybe a pickup ---- */
+   480→   480→    const deactivateDrone = (g: Game, d: Drone, idx: number) => {
+   481→   481→      const col = DRONE_COLORS[d.tier - 1];
+   482→   482→      burst(g, d.x, d.y, col, 16, 3.2);
+   483→   483→      burst(g, d.x, d.y, '#fbbf24', 10, 2.2);
+   484→   484→      const pts = 150 + g.wave * 50;
+   485→   485→      g.score += pts;
+   486→   486→      g.robotsDown += 1;
+   487→   487→      setScore(g.score);
+   488→   488→      setRobotsDown(g.robotsDown);
+   489→   489→      pop(g, d.x, d.y - 18, `+${dNum(pts)}`, '#fbbf24');
+   490→   490→      sfx.capture();
+   491→   491→      if (Math.random() < PICKUP_CHANCE) {
+   492→   492→        let px2 = d.x;
+   493→   493→        let py2 = d.y;
+   494→   494→        if (!pointFree(px2, py2, 12, g.walls)) {
+   495→   495→          px2 = d.x + (Math.random() - 0.5) * 60;
+   496→   496→          py2 = d.y + (Math.random() - 0.5) * 60;
+   497→   497→        }
+   498→   498→        const roll = Math.random();
+   499→   499→        const kind: PickupKind = roll < 0.38 ? 'shield' : roll < 0.72 ? 'rapid' : 'repair';
+   500→   500→        g.pickups.push({ id: idRef.current++, x: px2, y: py2, kind, t: 0, life: PICKUP_LIFE });
+   501→   501→      }
+   502→   502→      g.drones.splice(idx, 1);
+   503→   503→      g.shake = Math.max(g.shake, 0.35);
+   504→   504→    };
+   505→   505→
+   506→   506→    const hitPlayer = (g: Game) => {
+   507→   507→      if (g.invT > 0 || g.phase !== 'playing') return;
+   508→   508→      g.hitThisWave = true;
+   509→   509→      burst(g, g.px, g.py, '#f87171', 14, 2.6);
+   510→   510→      if (g.shield > 0) {
+   511→   511→        g.shield = 0;
+   512→   512→        setPow({ s: 0, r: g.rapid > 0 ? Math.ceil(g.rapid / 1000) : 0 });
+   513→   513→        burst(g, g.px, g.py, '#38bdf8', 18, 3);
+   514→   514→        g.invT = 800;
+   515→   515→        g.shake = 0.6;
+   516→   516→        sfx.bad();
+   517→   517→        return;
+   518→   518→      }
+   519→   519→      g.hearts -= 1;
+   520→   520→      setHearts(g.hearts);
+   521→   521→      g.invT = INV_MS;
+   522→   522→      g.shake = 1;
+   523→   523→      sfx.bad();
+   524→   524→      if (g.hearts <= 0) {
+   525→   525→        burst(g, g.px, g.py, '#fbbf24', 34, 4.2);
+   526→   526→        burst(g, g.px, g.py, '#fde68a', 20, 2.8);
+   527→   527→        g.shake = 1.4;
+   528→   528→        addTimer(window.setTimeout(() => endRun(false), 700));
+   529→   529→      }
+   530→   530→    };
+   531→   531→
+   532→   532→    /* ---------------- update: player ---------------- */
+   533→   533→    const updatePlayer = (g: Game, step: number, dt: number) => {
+   534→   534→      g.fireT = Math.max(0, g.fireT - dt);
+   535→   535→      g.invT = Math.max(0, g.invT - dt);
+   536→   536→      const before = { s: Math.ceil(g.shield / 1000), r: Math.ceil(g.rapid / 1000) };
+   537→   537→      g.shield = Math.max(0, g.shield - dt);
+   538→   538→      g.rapid = Math.max(0, g.rapid - dt);
+   539→   539→      const after = { s: Math.ceil(g.shield / 1000), r: Math.ceil(g.rapid / 1000) };
+   540→   540→      if (before.s !== after.s || before.r !== after.r) setPow({ s: after.s, r: after.r });
+   541→   541→      g.shake = Math.max(0, g.shake - 0.03 * step);
+   542→   542→
+   543→   543→      let dx = 0;
+   544→   544→      let dy = 0;
+   545→   545→      const k = g.keys;
+   546→   546→      if (k.has('w') || k.has('arrowup')) dy -= 1;
+   547→   547→      if (k.has('s') || k.has('arrowdown')) dy += 1;
+   548→   548→      if (k.has('a') || k.has('arrowleft')) dx -= 1;
+   549→   549→      if (k.has('d') || k.has('arrowright')) dx += 1;
+   550→   550→      if (g.stick.active) { dx += g.stick.dx; dy += g.stick.dy; }
+   551→   551→      const m = Math.hypot(dx, dy);
+   552→   552→      if (m > 1) { dx /= m; dy /= m; }
+   553→   553→
+   554→   554→      const ease = Math.min(1, 0.22 * step);
+   555→   555→      let vx = g.pvx + (dx * PLAYER_SPEED - g.pvx) * ease;
+   556→   556→      let vy = g.pvy + (dy * PLAYER_SPEED - g.pvy) * ease;
+   557→   557→      let x = g.px + vx * step;
+   558→   558→      let y = g.py + vy * step;
+   559→   559→
+   560→   560→      const res = resolveWalls(x, y, PLAYER_R, vx, vy, 0.15, g.walls);
+   561→   561→      x = res.x; y = res.y; vx = res.vx; vy = res.vy;
+   562→   562→      const b = resolveBounds(x, y, PLAYER_R, vx, vy, 0);
+   563→   563→      x = b.x; y = b.y; vx = b.vx; vy = b.vy;
+   564→   564→      g.px = x; g.py = y; g.pvx = vx; g.pvy = vy;
+   565→   565→
+   566→   566→      const spd = Math.hypot(vx, vy);
+   567→   567→      if (spd > 0.4) g.hullAng = angLerp(g.hullAng, Math.atan2(vy, vx), Math.min(1, 0.22 * step));
+   568→   568→      if (spd > 1.2 && Math.random() < 0.4) {
+   569→   569→        g.parts.push({ x: x - Math.cos(g.hullAng) * 14, y: y - Math.sin(g.hullAng) * 14, vx: -vx * 0.2, vy: -vy * 0.2, life: 260, max: 260, c: '#f59e0b', r: 1.2 + Math.random() });
+   570→   570→      }
+   571→   571→
+   572→   572→      /* turret aim: mouse / touch-drag point, else lead-predicting auto-aim */
+   573→   573→      let targetAng = g.gunAng;
+   574→   574→      if (g.aimMode === 'mouse' || g.aimMode === 'manual') {
+   575→   575→        targetAng = Math.atan2(g.aim.y - y, g.aim.x - x);
+   576→   576→      } else {
+   577→   577→        let bestD = Infinity;
+   578→   578→        let bestDrone: Drone | null = null;
+   579→   579→        for (const d of g.drones) {
+   580→   580→          if (d.state === 'spawn') continue;
+   581→   581→          const dd = Math.hypot(d.x - x, d.y - y);
+   582→   582→          const score2 = dd - (hasLOS(x, y, d.x, d.y, g.walls) ? 220 : 0);
+   583→   583→          if (score2 < bestD) { bestD = score2; bestDrone = d; }
+   584→   584→        }
+   585→   585→        if (bestDrone) targetAng = interceptAngle(x, y, bestDrone.x, bestDrone.y, bestDrone.vx, bestDrone.vy, PULSE_SPEED);
+   586→   586→      }
+   587→   587→      g.gunAng = angLerp(g.gunAng, targetAng, Math.min(1, 0.45 * step));
+   588→   588→
+   589→   589→      /* fire */
+   590→   590→      const firing = fireMouseRef.current || fireKeyRef.current || fireBtnRef.current || fireTouchRef.current;
+   591→   591→      if (firing && g.fireT <= 0) {
+   592→   592→        g.fireT = g.rapid > 0 ? RAPID_CD : FIRE_CD;
+   593→   593→        const mx = x + Math.cos(g.gunAng) * (PLAYER_R + 8);
+   594→   594→        const my = y + Math.sin(g.gunAng) * (PLAYER_R + 8);
+   595→   595→        g.pulses.push({ x: mx, y: my, vx: Math.cos(g.gunAng) * PULSE_SPEED, vy: Math.sin(g.gunAng) * PULSE_SPEED, r: PULSE_R, life: PULSE_LIFE, bounces: 0, friendly: true, color: '#fbbf24' });
+   596→   596→        g.shots += 1;
+   597→   597→        burst(g, mx, my, '#fde68a', 3, 1.6);
+   598→   598→        sfx.drop();
+   599→   599→      }
+   600→   600→    };
+   601→   601→
+   602→   602→    /* ---------------- update: drones (state machine) ---------------- */
+   603→   603→    const newWaypoint = (g: Game, d: Drone) => {
+   604→   604→      for (let i = 0; i < 10; i++) {
+   605→   605→        const x = PAD + 34 + Math.random() * (ARENA_W - 2 * (PAD + 34));
+   606→   606→        const y = PAD + 34 + Math.random() * (ARENA_H - 2 * (PAD + 34));
+   607→   607→        if (pointFree(x, y, DRONE_R + 6, g.walls)) { d.wp = { x, y }; return; }
+   608→   608→      }
+   609→   609→      d.wp = { ...mmArenaForWave(g.wave).playerSpawn };
+   610→   610→    };
+   611→   611→
+   612→   612→    const updateDrone = (g: Game, d: Drone, step: number, dt: number) => {
+   613→   613→      if (d.state === 'spawn') {
+   614→   614→        d.spawnT -= dt;
+   615→   615→        d.spin += 0.12 * step;
+   616→   616→        if (d.spawnT <= 0) {
+   617→   617→          d.state = 'patrol'; // materialize: becomes vulnerable + starts hunting
+   618→   618→          newWaypoint(g, d);
+   619→   619→        }
+   620→   620→        return;
+   621→   621→      }
+   622→   622→      const spec = droneSpec(d.tier);
+   623→   623→      d.flashT = Math.max(0, d.flashT - dt);
+   624→   624→      d.dodgeT = Math.max(0, d.dodgeT - dt);
+   625→   625→      d.spin += (0.03 + d.tier * 0.004) * step;
+   626→   626→
+   627→   627→      const pdx = g.px - d.x;
+   628→   628→      const pdy = g.py - d.y;
+   629→   629→      const pd = Math.hypot(pdx, pdy) || 1;
+   630→   630→      const los = hasLOS(d.x, d.y, g.px, g.py, g.walls);
+   631→   631→
+   632→   632→      /* --- transitions --- */
+   633→   633→      if (d.state === 'patrol') {
+   634→   634→        if (los && pd < AGGRO) d.state = 'chase';
+   635→   635→      } else if (d.state === 'chase') {
+   636→   636→        if (!los && pd > AGGRO) {
+   637→   637→          d.state = 'patrol';
+   638→   638→          newWaypoint(g, d);
+   639→   639→        } else if (d.fireT <= 0 && los && pd < FIRE_RANGE) {
+   640→   640→          d.state = 'aim';
+   641→   641→          d.aimT = spec.aimMs;
+   642→   642→          d.losLost = 0;
+   643→   643→        }
+   644→   644→      } else if (d.state === 'aim') {
+   645→   645→        if (!los) {
+   646→   646→          d.losLost += dt;
+   647→   647→          if (d.losLost > 320) { d.state = 'chase'; d.fireT = 420; }
+   648→   648→        } else {
+   649→   649→          d.aimT -= dt;
+   650→   650→          if (d.aimT <= 0) {
+   651→   651→            const tLead = (pd / spec.plasma) * spec.lead;
+   652→   652→            const ax = g.px + g.pvx * tLead;
+   653→   653→            const ay = g.py + g.pvy * tLead;
+   654→   654→            const ang = Math.atan2(ay - d.y, ax - d.x);
+   655→   655→            const mx = d.x + Math.cos(ang) * (DRONE_R + 7);
+   656→   656→            const my = d.y + Math.sin(ang) * (DRONE_R + 7);
+   657→   657→            g.pulses.push({ x: mx, y: my, vx: Math.cos(ang) * spec.plasma, vy: Math.sin(ang) * spec.plasma, r: PLASMA_R, life: 5200, bounces: 0, friendly: false, color: DRONE_COLORS[d.tier - 1] });
+   658→   658→            burst(g, mx, my, DRONE_COLORS[d.tier - 1], 4, 1.4);
+   659→   659→            d.fireT = spec.fireMs * (0.85 + Math.random() * 0.35);
+   660→   660→            d.state = 'chase';
+   661→   661→          }
+   662→   662→        }
+   663→   663→      }
+   664→   664→      if (d.state !== 'aim') d.fireT -= dt;
+   665→   665→
+   666→   666→      /* --- shot-dodge strafe (tier 6+) --- */
+   667→   667→      if (spec.dodge && d.dodgeT <= 0) {
+   668→   668→        for (const p of g.pulses) {
+   669→   669→          if (!p.friendly) continue;
+   670→   670→          const ddx = d.x - p.x;
+   671→   671→          const ddy = d.y - p.y;
+   672→   672→          const dist = Math.hypot(ddx, ddy);
+   673→   673→          if (dist > DODGE_RANGE || dist < 1) continue;
+   674→   674→          const ux = p.vx / PULSE_SPEED;
+   675→   675→          const uy = p.vy / PULSE_SPEED;
+   676→   676→          const closing = ux * ddx + uy * ddy;
+   677→   677→          const perp = Math.abs(ux * ddy - uy * ddx);
+   678→   678→          if (closing > 0 && perp < DODGE_PERP) {
+   679→   679→            const pa = Math.atan2(p.vy, p.vx);
+   680→   680→            d.dodgeAng = pa + (ux * ddy - uy * ddx > 0 ? 1 : -1) * (Math.PI / 2);
+   681→   681→            d.dodgeT = 340;
+   682→   682→            break;
+   683→   683→          }
+   684→   684→        }
+   685→   685→      }
+   686→   686→
+   687→   687→      /* --- steering --- */
+   688→   688→      let tx = 0;
+   689→   689→      let ty = 0;
+   690→   690→      let mul = 1;
+   691→   691→      if (d.state === 'patrol') {
+   692→   692→        const wdx = d.wp.x - d.x;
+   693→   693→        const wdy = d.wp.y - d.y;
+   694→   694→        const wd = Math.hypot(wdx, wdy);
+   695→   695→        if (wd < 34) newWaypoint(g, d);
+   696→   696→        else { tx = wdx / wd; ty = wdy / wd; mul = 0.6; }
+   697→   697→      } else if (d.state === 'chase') {
+   698→   698→        const ux = pdx / pd;
+   699→   699→        const uy = pdy / pd;
+   700→   700→        if (!los) { tx = ux; ty = uy; } // lost sight → push toward the player and slide around cover
+   701→   701→        else if (pd > KEEP + 60) { tx = ux; ty = uy; }
+   702→   702→        else if (pd < KEEP - 70) { tx = -ux; ty = -uy; }
+   703→   703→        else { tx = -uy * d.orbitDir; ty = ux * d.orbitDir; }
+   704→   704→        if (Math.random() < 0.004 * step) d.orbitDir *= -1;
+   705→   705→      } else {
+   706→   706→        mul = 0.12; // aiming: dig in
+   707→   707→      }
+   708→   708→      if (d.dodgeT > 0) { tx += Math.cos(d.dodgeAng) * 1.5; ty += Math.sin(d.dodgeAng) * 1.5; }
+   709→   709→
+   710→   710→      const tm = Math.hypot(tx, ty);
+   711→   711→      let vx = d.vx;
+   712→   712→      let vy = d.vy;
+   713→   713→      if (tm > 0.01) {
+   714→   714→        const sp = spec.speed * mul;
+   715→   715→        const ke = Math.min(1, 0.14 * step);
+   716→   716→        vx += ((tx / tm) * sp - vx) * ke;
+   717→   717→        vy += ((ty / tm) * sp - vy) * ke;
+   718→   718→      } else {
+   719→   719→        vx *= Math.pow(0.9, step);
+   720→   720→        vy *= Math.pow(0.9, step);
+   721→   721→      }
+   722→   722→      let x = d.x + vx * step;
+   723→   723→      let y = d.y + vy * step;
+   724→   724→      const res = resolveWalls(x, y, DRONE_R, vx, vy, 0.1, g.walls);
+   725→   725→      x = res.x; y = res.y; vx = res.vx; vy = res.vy;
+   726→   726→      const b = resolveBounds(x, y, DRONE_R, vx, vy, 0);
+   727→   727→      d.x = b.x; d.y = b.y; d.vx = b.vx; d.vy = b.vy;
+   728→   728→
+   729→   729→      if (Math.hypot(d.vx, d.vy) > 0.25) d.bodyAng = angLerp(d.bodyAng, Math.atan2(d.vy, d.vx), Math.min(1, 0.16 * step));
+   730→   730→
+   731→   731→      /* gun tracks the player with tier-scaled lead */
+   732→   732→      if (los) {
+   733→   733→        const tLead = (pd / spec.plasma) * spec.lead;
+   734→   734→        const ax = g.px + g.pvx * tLead;
+   735→   735→        const ay = g.py + g.pvy * tLead;
+   736→   736→        d.gunAng = angLerp(d.gunAng, Math.atan2(ay - d.y, ax - d.x), Math.min(1, (0.07 + d.tier * 0.02) * step));
+   737→   737→      } else if (tm > 0.01) {
+   738→   738→        d.gunAng = angLerp(d.gunAng, Math.atan2(vy, vx), Math.min(1, 0.08 * step));
+   739→   739→      }
+   740→   740→    };
+   741→   741→
+   742→   742→    /* ---------------- update: pulses (banked logic + plasma) ---------------- */
+   743→   743→    const updatePulses = (g: Game, step: number, dt: number) => {
+   744→   744→      for (let i = g.pulses.length - 1; i >= 0; i--) {
+   745→   745→        const p = g.pulses[i];
+   746→   746→        p.x += p.vx * step;
+   747→   747→        p.y += p.vy * step;
+   748→   748→        p.life -= dt;
+   749→   749→
+   750→   750→        /* boundary */
+   751→   751→        const bb = resolveBounds(p.x, p.y, p.r, p.vx, p.vy, 1);
+   752→   752→        let bounced = bb.hit;
+   753→   753→        p.x = bb.x; p.y = bb.y; p.vx = bb.vx; p.vy = bb.vy;
+   754→   754→
+   755→   755→        /* walls */
+   756→   756→        for (const w of g.walls) {
+   757→   757→          const c = circleRect(p.x, p.y, p.r, w);
+   758→   758→          if (!c) continue;
+   759→   759→          p.x += c.nx * c.pen;
+   760→   760→          p.y += c.ny * c.pen;
+   761→   761→          const vn = p.vx * c.nx + p.vy * c.ny;
+   762→   762→          if (vn < 0) {
+   763→   763→            p.vx -= 2 * vn * c.nx;
+   764→   764→            p.vy -= 2 * vn * c.ny;
+   765→   765→            bounced = true;
+   766→   766→          }
+   767→   767→          break;
+   768→   768→        }
+   769→   769→
+   770→   770→        if (bounced) {
+   771→   771→          p.bounces += 1;
+   772→   772→          burst(g, p.x, p.y, p.friendly ? '#fde68a' : p.color, 4, 1.4);
+   773→   773→          if (p.bounces > PULSE_BOUNCES) {
+   774→   774→            burst(g, p.x, p.y, p.friendly ? '#fbbf24' : p.color, 6, 1.6);
+   775→   775→            g.pulses.splice(i, 1);
+   776→   776→            continue;
+   777→   777→          }
+   778→   778→          if (p.friendly) {
+   779→   779→            const now = performance.now();
+   780→   780→            if (now - lastBounceSfx > 60) { sfx.click(); lastBounceSfx = now; }
+   781→   781→          }
+   782→   782→        }
+   783→   783→
+   784→   784→        if (p.life <= 0) { g.pulses.splice(i, 1); continue; }
+   785→   785→
+   786→   786→        if (p.friendly) {
+   787→   787→          for (let j = g.drones.length - 1; j >= 0; j--) {
+   788→   788→            const d = g.drones[j];
+   789→   789→            if (d.state === 'spawn') continue;
+   790→   790→            if (Math.hypot(d.x - p.x, d.y - p.y) < DRONE_R + p.r) {
+   791→   791→              g.hits += 1;
+   792→   792→              d.hp -= 1;
+   793→   793→              d.flashT = 130;
+   794→   794→              d.vx += p.vx * 0.3;
+   795→   795→              d.vy += p.vy * 0.3;
+   796→   796→              burst(g, p.x, p.y, DRONE_COLORS[d.tier - 1], 8, 2.2);
+   797→   797→              g.pulses.splice(i, 1);
+   798→   798→              if (d.hp <= 0) deactivateDrone(g, d, j);
+   799→   799→              else sfx.chat();
+   800→   800→              break;
+   801→
+   802→[showing lines 1-800 of 1593; use offset=801 with limit to continue reading]

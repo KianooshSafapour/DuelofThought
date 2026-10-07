@@ -1,0 +1,18 @@
+{
+  "name": "دوئل ایده‌ها | Duel of Ideas",
+  "short_name": "دوئل ایده‌ها",
+  "description": "نبرد استراتژیک اعداد — چهار هم‌خانواده یا چهار عدد پشت‌سرهم | A strategic numbers duel",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f0524",
+  "theme_color": "#1e1145",
+  "lang": "fa",
+  "dir": "rtl",
+  "categories": ["games", "education"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

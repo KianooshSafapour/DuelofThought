@@ -1,0 +1,819 @@
+        subtitle="40-LEVEL CAMPAIGN · TANK GARAGE"
+        accent="#f43f5e"
+        cartridgeIcon="🕹️"
+        onDone={() => { setBooted(true); setScreen('menu'); }}
+      />
+    );
+  }
+
+  const tank = TANK_BY_ID[save.selectedTank] ?? TANKS[0];
+  const starsAll = totalStars(save);
+
+  const headerChips = (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+      <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">
+        💰 {dNum(save.money)} <span className="text-amber-200/60">{t('tt_money')}</span>
+      </span>
+      <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">
+        <Rocket className="h-3 w-3" /> {t('tt_driver_lvl')} {dNum(save.driverLevel)}
+      </span>
+      <span className="inline-flex items-center gap-1 rounded-full border border-yellow-500/30 bg-yellow-500/10 px-2.5 py-1 text-yellow-300">
+        ⭐ {dNum(starsAll)}
+      </span>
+    </div>
+  );
+
+  const menuButton = (label: string, icon: React.ReactNode, onClick: () => void, primary = false) => (
+    <Button
+      className={`h-11 justify-start gap-2.5 text-sm ${primary ? 'glow-gold bg-rose-600 text-white hover:bg-rose-500' : 'bg-white/5 hover:bg-white/10'}`}
+      variant={primary ? 'default' : 'outline'}
+      onClick={onClick}
+    >
+      {icon} {label}
+    </Button>
+  );
+
+  /* ---------- MENU ---------- */
+  if (screen === 'menu') {
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="tt-shell mx-auto w-full max-w-lg px-3 py-6">
+          <div className="animate-pop rounded-3xl border border-rose-500/25 bg-black/40 p-6 text-center shadow-2xl shadow-black/50 backdrop-blur-sm">
+            <div className="mx-auto mb-4 grid h-20 w-20 place-items-center rounded-2xl border border-rose-500/40 bg-rose-500/10 text-4xl shadow-[0_0_30px_rgba(244,63,94,0.35)]">🛡️</div>
+            <h1 className="text-4xl font-black tracking-widest text-rose-400 sm:text-5xl" style={{ textShadow: '0 0 24px rgba(244,63,94,0.55), 3px 3px 0 rgba(0,0,0,0.9)' }}>TINKTANK</h1>
+            <p className="mt-1 text-sm font-bold text-rose-200/70">{t('tt_menu_sub')}</p>
+            <div className="mt-4 flex justify-center">{headerChips}</div>
+            <div className="mt-6 grid gap-2 text-start">
+              {menuButton(t('tt_menu_campaign'), <Swords className="h-4 w-4 text-rose-400" />, () => { sfx.click(); setScreen('levels'); }, true)}
+              {menuButton(t('tt_menu_garage'), <Wrench className="h-4 w-4 text-sky-400" />, () => { sfx.click(); setScreen('garage'); })}
+              {menuButton(t('tt_menu_howto'), <Crosshair className="h-4 w-4 text-amber-400" />, () => { sfx.click(); setScreen('howto'); })}
+              {menuButton(t('tt_menu_stats'), <Trophy className="h-4 w-4 text-yellow-400" />, () => { sfx.click(); setScreen('stats'); })}
+              {menuButton(t('tt_menu_exit'), <X className="h-4 w-4 text-muted-foreground" />, () => { sfx.click(); onExit(); })}
+            </div>
+            <p className="mt-4 text-[10px] text-muted-foreground">
+              {tankName(tank, locale)} · {t('tt_special')}: {t(`tt_sp_${tank.special}` as never)}
+            </p>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- LEVEL SELECT ---------- */
+  if (screen === 'levels') {
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-3xl px-3 py-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <Button variant="outline" size="sm" className="bg-white/5" onClick={() => { sfx.click(); setScreen('menu'); }}>
+              {t('tt_back_menu')}
+            </Button>
+            {headerChips}
+          </div>
+          <div className="rounded-3xl border border-rose-500/25 bg-black/40 p-4 shadow-2xl shadow-black/50">
+            <h2 className="text-lg font-black text-rose-300">⚔️ {t('tt_campaign_title')}</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">{t('tt_campaign_sub')}</p>
+            <div className="nice-scroll mt-4 grid max-h-[58vh] grid-cols-4 gap-2 overflow-y-auto pe-1 sm:grid-cols-6 md:grid-cols-8">
+              {Array.from({ length: 40 }, (_, i) => {
+                const lv = i + 1;
+                const unlocked = isLevelUnlocked(save, lv);
+                const rec = save.levels[String(lv)];
+                const count = missionsInLevel(lv);
+                const done = rec ? rec.stars.filter((s) => s > 0).length : 0;
+                const st = rec ? rec.stars.reduce((a, b) => a + b, 0) : 0;
+                const boss = lv % 4 === 0;
+                return (
+                  <button
+                    key={lv}
+                    type="button"
+                    disabled={!unlocked}
+                    onClick={() => { sfx.click(); setSelLevel(lv); setScreen('level'); }}
+                    className={`group relative aspect-square rounded-xl border p-1 text-center transition-transform ${unlocked ? 'border-rose-500/30 bg-gradient-to-b from-rose-950/60 to-black/60 hover:-translate-y-0.5 hover:border-rose-400/60' : 'cursor-not-allowed border-white/10 bg-black/40 opacity-60'} ${boss && unlocked ? 'ring-1 ring-amber-500/50' : ''}`}
+                    title={unlocked ? `${t('tt_level_n')} ${lv}` : t('tt_locked_level')}
+                  >
+                    <span className={`block pt-1.5 text-lg font-black ${unlocked ? 'text-rose-200' : 'text-white/30'}`}>{dNum(lv)}</span>
+                    {unlocked ? (
+                      <>
+                        <span className="block text-[8px] leading-tight text-amber-300/90">⭐{dNum(st)}/{dNum(count * 3)}</span>
+                        <span className="block text-[8px] leading-tight text-muted-foreground">{dNum(done)}/{dNum(count)}</span>
+                        {boss && <span className="absolute end-1 top-1 text-[9px]">💀</span>}
+                      </>
+                    ) : (
+                      <span className="absolute inset-0 grid place-items-center"><Lock className="h-3.5 w-3.5 text-white/30" /></span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- LEVEL DETAIL (mission list) ---------- */
+  if (screen === 'level') {
+    const count = missionsInLevel(selLevel);
+    const rec = save.levels[String(selLevel)];
+    const kinds = ['clear', 'survive', 'siege'] as const;
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-2xl px-3 py-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <Button variant="outline" size="sm" className="bg-white/5" onClick={() => { sfx.click(); setScreen('levels'); }}>
+              {t('tt_to_map')}
+            </Button>
+            {headerChips}
+          </div>
+          <div className="rounded-3xl border border-rose-500/25 bg-black/40 p-4 shadow-2xl shadow-black/50">
+            <h2 className="text-lg font-black text-rose-300">
+              {t('tt_level_title')} {dNum(selLevel)} {selLevel % 4 === 0 && <span title={t('tt_boss_level')}>💀</span>}
+            </h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {t('tt_missions_done')}: {dNum(rec ? rec.stars.filter((s) => s > 0).length : 0)} / {dNum(count)} · ⭐ {dNum(rec ? rec.stars.reduce((a, b) => a + b, 0) : 0)}/{dNum(count * 3)}
+            </p>
+            <div className="nice-scroll mt-3 max-h-[56vh] space-y-2 overflow-y-auto pe-1">
+              {Array.from({ length: count }, (_, i) => {
+                const kind = selLevel % 4 === 0 && i === count - 1 ? 'boss' as const : kinds[i % 3];
+                const unlockedM = isMissionUnlocked(save, selLevel, i);
+                const st = rec?.stars[i] ?? 0;
+                const next = unlockedM && st === 0;
+                const mission = buildMission(selLevel, i);
+                return (
+                  <div
+                    key={i}
+                    className={`flex items-center gap-3 rounded-xl border p-2.5 ${next ? 'border-rose-400/60 bg-rose-500/10' : unlockedM ? 'border-white/10 bg-white/[0.04]' : 'border-white/5 bg-black/30 opacity-55'}`}
+                  >
+                    <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg text-sm font-black ${kind === 'boss' ? 'bg-amber-500/20 text-amber-300' : 'bg-white/10 text-rose-200'}`}>
+                      {kind === 'boss' ? '💀' : dNum(i + 1)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-black" style={{ color: kind === 'boss' ? '#fbbf24' : '#fda4af' }}>
+                        {t(`tt_kind_${kind}` as never)} — {t(`tt_objective_${kind}` as never)}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-muted-foreground">
+                        {kind === 'clear' && <>{t('tt_waves_label')}: {dNum(mission.waves)} · </>}
+                        {kind === 'survive' && <>{t('tt_hud_time')}: {dNum(Math.round(mission.surviveMs / 1000))}s · </>}
+                        {kind === 'boss' && <>{t('tt_boss_name')} · </>}
+                        {t('tt_par_time')}: {dNum(Math.round(mission.parMs / 1000))}s
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-[11px] tracking-tight text-amber-300">
+                      {'★'.repeat(st)}<span className="text-white/15">{'★'.repeat(3 - st)}</span>
+                    </span>
+                    {unlockedM && (
+                      <Button size="sm" className={`shrink-0 ${next ? 'bg-rose-600 text-white hover:bg-rose-500' : 'bg-white/10'}`} onClick={() => deploy(selLevel, i)}>
+                        <Play className="me-1 h-3.5 w-3.5" /> {next ? t('tt_start_mission') : t('tt_replay_mission')}
+                      </Button>
+                    )}
+                    {!unlockedM && <Lock className="h-4 w-4 shrink-0 text-white/25" />}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- BRIEFING ---------- */
+  if (screen === 'brief') {
+    const count = missionsInLevel(selLevel);
+    const kind = selLevel % 4 === 0 && selMission === count - 1 ? 'boss' as const : (['clear', 'survive', 'siege'] as const)[selMission % 3];
+    const mission = buildMission(selLevel, selMission);
+    const p = computeParams(tank, save.upgrades);
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-lg px-3 py-4">
+          <div className="animate-pop rounded-3xl border border-rose-500/25 bg-black/40 p-5 shadow-2xl shadow-black/50">
+            <p className="text-[10px] uppercase tracking-widest text-rose-300/70">{t('tt_brief_title')}</p>
+            <h2 className="mt-1 text-xl font-black text-rose-300">
+              {t('tt_level_title')} {dNum(selLevel)} · {t('tt_mission' as never)} {dNum(selMission + 1)} — {t(`tt_kind_${kind}` as never)}
+            </h2>
+            <div className="mt-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3">
+              <p className="text-sm font-bold text-rose-100">🎯 {t(`tt_objective_${kind}` as never)}</p>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-rose-200/80">
+                {kind === 'clear' && <span>⚔️ {t('tt_waves_label')}: <b>{dNum(mission.waves)}</b></span>}
+                {kind === 'survive' && <span>⏱ {t('tt_hud_time')}: <b>{dNum(Math.round(mission.surviveMs / 1000))}s</b></span>}
+                {kind === 'siege' && <span>🏗 {t('tt_generator_label')} HP: <b>{dNum(mission.genHp)}</b></span>}
+                {kind === 'boss' && <span>💀 {t('tt_boss_name')} · {dNum(mission.bossPhases)} phases</span>}
+                <span>🤖 {t('tt_enemy_intel')}: HP {dNum(mission.droneHp)}+</span>
+                <span>⏱ {t('tt_par_time')}: <b>{dNum(Math.round(mission.parMs / 1000))}s</b></span>
+              </div>
+            </div>
+            <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.04] p-3">
+              <div className="flex items-center gap-2">
+                <span className="grid h-9 w-9 place-items-center rounded-lg text-lg" style={{ background: `${tank.color}22`, color: tank.glow }}>🛡️</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-black" style={{ color: tank.glow }}>{tankName(tank, locale)}</p>
+                  <p className="text-[10px] text-muted-foreground">{t('tt_selected_tank')} — <button className="underline decoration-dotted" onClick={() => { sfx.click(); setScreen('garage'); }}>{t('tt_change_in_garage')}</button></p>
+                </div>
+              </div>
+              <div className="mt-2 grid grid-cols-5 gap-1.5 text-center text-[9px] text-muted-foreground">
+                {TANK_STATS.map((s) => (
+                  <div key={s}>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+                      <div className="h-full rounded-full" style={{ width: `${(effStat(tank, s, save.upgrades) / 10) * 100}%`, background: tank.glow }} />
+                    </div>
+                    <span className="mt-0.5 block">{t(`tt_stat_${s}` as never)}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-[10px] text-sky-300/90">⚡ {t(`tt_sp_${tank.special}` as never)} — HP {dNum(p.maxHp)}</p>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <Button className="glow-gold flex-1 bg-rose-600 text-white hover:bg-rose-500" onClick={() => deploy(selLevel, selMission)}>
+                <Rocket className="me-1.5 h-4 w-4" /> {t('tt_deploy')}
+              </Button>
+              <Button variant="outline" onClick={() => { sfx.click(); setScreen('level'); }}>
+                {t('tt_to_map')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- GARAGE ---------- */
+  if (screen === 'garage') {
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-4xl px-3 py-4">
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <Button variant="outline" size="sm" className="bg-white/5" onClick={() => { sfx.click(); setScreen('menu'); }}>
+              {t('tt_back_menu')}
+            </Button>
+            {headerChips}
+          </div>
+          <div className="rounded-3xl border border-sky-500/25 bg-black/40 p-4 shadow-2xl shadow-black/50">
+            <h2 className="text-lg font-black text-sky-300">🔧 {t('tt_garage_title')}</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">{t('tt_garage_sub')}</p>
+            <div className="nice-scroll mt-4 grid max-h-[62vh] gap-3 overflow-y-auto pe-1 sm:grid-cols-2">
+              {TANKS.map((tk) => {
+                const owned = save.ownedTanks.includes(tk.id);
+                const selected = save.selectedTank === tk.id;
+                const levelOk = save.driverLevel >= tk.reqLevel;
+                const affordable = save.money >= tk.price;
+                return (
+                  <div
+                    key={tk.id}
+                    className={`relative rounded-2xl border p-3 transition-colors ${selected ? 'border-amber-400/60 bg-amber-500/5' : owned ? 'border-white/15 bg-white/[0.03]' : 'border-white/10 bg-black/40'}`}
+                  >
+                    {selected && <span className="absolute -top-2 end-3 rounded-full bg-amber-500 px-2 py-0.5 text-[9px] font-black text-black">{t('tt_selected')}</span>}
+                    <div className="flex items-start gap-3">
+                      <TankArt tank={tk} selected={selected} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-black" style={{ color: tk.glow }}>{tankName(tk, locale)}</p>
+                        <p className="mt-0.5 text-[10px] leading-snug text-muted-foreground">{tankBlurb(tk, locale)}</p>
+                        <p className="mt-1 text-[10px] font-bold text-sky-300/90">⚡ {t(`tt_sp_${tk.special}` as never)}</p>
+                        <p className="text-[9.5px] text-muted-foreground">{t(`tt_passive_${tk.id === 'tesla' ? 'chain' : tk.id === 'volcano' ? 'splash' : tk.id === 'prism' ? 'pierce' : tk.id === 'omega' ? 'regen' : 'none'}` as never)}</p>
+                      </div>
+                    </div>
+                    {/* stat bars + upgrades */}
+                    <div className="mt-2.5 space-y-1.5">
+                      {TANK_STATS.map((s) => {
+                        const tier = save.upgrades[`${tk.id}:${s}`] ?? 0;
+                        const eff = effStat(tk, s, save.upgrades);
+                        const cost = upgradeCost(tk, tier);
+                        return (
+                          <div key={s} className="flex items-center gap-2">
+                            <span className="w-11 shrink-0 text-[9px] font-bold text-muted-foreground">{t(`tt_stat_${s}` as never)}</span>
+                            <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/10">
+                              <div className="h-full rounded-full transition-all" style={{ width: `${(eff / 10) * 100}%`, background: `linear-gradient(90deg, ${tk.color}, ${tk.glow})` }} />
+                            </div>
+                            <span className="w-6 text-end text-[9px] font-black" style={{ color: tk.glow }}>{dNum(Math.round(eff * 10) / 10)}</span>
+                            {owned ? (
+                              tier < 5 ? (
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-black text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:opacity-40"
+                                  disabled={save.money < cost}
+                                  title={`${t('tt_upgrade')} +${dNum(cost)} 💰`}
+                                  onClick={() => upgradeStat(tk, s)}
+                                >
+                                  ↑{dNum(cost)}
+                                </button>
+                              ) : (
+                                <span className="shrink-0 rounded-md bg-white/10 px-1.5 py-0.5 text-[9px] font-black text-white/50">{t('tt_maxed')}</span>
+                              )
+                            ) : (
+                              <span className="w-9 shrink-0" />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* action row */}
+                    <div className="mt-2.5 flex items-center gap-2">
+                      {!owned && (
+                        <>
+                          <span className="text-[11px] font-black text-amber-300">💰 {dNum(tk.price)}</span>
+                          {!levelOk && <span className="rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300">{t('tt_need_driver')} {dNum(tk.reqLevel)}</span>}
+                          <Button
+                            size="sm"
+                            className="ms-auto bg-emerald-600 text-white hover:bg-emerald-500"
+                            disabled={!levelOk || !affordable}
+                            onClick={() => buyTank(tk)}
+                          >
+                            {t('tt_buy')}
+                          </Button>
+                        </>
+                      )}
+                      {owned && !selected && (
+                        <Button size="sm" variant="outline" className="ms-auto bg-white/5" onClick={() => selectTank(tk)}>
+                          {t('tt_select')}
+                        </Button>
+                      )}
+                      {owned && selected && <span className="ms-auto text-[10px] font-bold text-amber-300">✓ {t('tt_selected')}</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- HOW TO ---------- */
+  if (screen === 'howto') {
+    const rows = [t('tt_how1'), t('tt_how2'), t('tt_how3'), t('tt_how4'), t('tt_how5'), t('tt_how6')];
+    const icons = ['🛡️', '🖱️', '📱', '⚔️', '⭐', '🔧'];
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-lg px-3 py-4">
+          <div className="rounded-3xl border border-amber-500/25 bg-black/40 p-5 shadow-2xl shadow-black/50">
+            <h2 className="text-lg font-black text-amber-300">📖 {t('tt_howto_title')}</h2>
+            <div className="mt-3 space-y-2">
+              {rows.map((r, i) => (
+                <div key={i} className="flex items-start gap-2.5 rounded-xl border border-white/10 bg-white/[0.04] p-2.5">
+                  <span className="mt-0.5 shrink-0">{icons[i]}</span>
+                  <p className="text-[11.5px] leading-relaxed text-foreground/90">{r}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-center text-[10px] text-muted-foreground">
+              <span className="hidden sm:inline">{t('tt_keys_hint')}</span>
+              <span className="sm:hidden">{t('tt_touch_hint')}</span>
+            </p>
+            <Button className="mt-4 w-full" onClick={() => { sfx.click(); setScreen('menu'); }}>{t('tt_back_menu')}</Button>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- STATS ---------- */
+  if (screen === 'stats') {
+    const levelsDone = Object.values(save.levels).filter((r) => r.cleared).length;
+    const stats: [string, number][] = [
+      [t('tt_levels_done'), levelsDone],
+      [t('tt_stat_missions'), save.stats.missions],
+      [t('tt_stat_kills'), save.stats.kills],
+      [t('tt_stat_boss'), save.stats.bossKills],
+      [t('tt_stat_perfect'), save.stats.perfect],
+      [t('tt_stat_deaths'), save.stats.deaths],
+      [t('tt_stat_best'), save.stats.bestScore],
+      [t('tt_stars_total'), starsAll],
+    ];
+    const need = driverNeed(save.driverLevel);
+    return (
+      <Shell rtl={rtl} onExit={onExit}>
+        <div className="mx-auto w-full max-w-lg px-3 py-4">
+          <div className="rounded-3xl border border-yellow-500/25 bg-black/40 p-5 shadow-2xl shadow-black/50">
+            <h2 className="text-lg font-black text-yellow-300">🏆 {t('tt_stats_title')}</h2>
+            <div className="mt-2 rounded-xl border border-sky-500/25 bg-sky-500/5 p-3">
+              <div className="flex items-center justify-between text-[11px] font-bold text-sky-200">
+                <span>{t('tt_driver_lvl')} {dNum(save.driverLevel)}</span>
+                <span>{dNum(save.driverXp)} / {dNum(need)} ✦</span>
+              </div>
+              <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-full rounded-full bg-gradient-to-r from-sky-500 to-cyan-300" style={{ width: `${(save.driverXp / need) * 100}%` }} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {stats.map(([label, v]) => (
+                <div key={label} className="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 text-center">
+                  <p className="text-lg font-black text-amber-300">{dNum(v)}</p>
+                  <p className="text-[9px] leading-tight text-muted-foreground">{label}</p>
+                </div>
+              ))}
+            </div>
+            <Button className="mt-4 w-full" onClick={() => { sfx.click(); setScreen('menu'); }}>{t('tt_back_menu')}</Button>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  /* ---------- GAME ---------- */
+  const mission = buildMission(selLevel, selMission);
+  const count = missionsInLevel(selLevel);
+  const kind = selLevel % 4 === 0 && selMission === count - 1 ? 'boss' as const : (['clear', 'survive', 'siege'] as const)[selMission % 3];
+
+  return (
+    <Shell rtl={rtl} onExit={onExit}>
+      <div className="tt-shell mx-auto flex min-h-[calc(100dvh-1rem)] w-full max-w-3xl flex-col px-2 pb-2 pt-2 sm:px-3">
+        {/* HUD */}
+        <div className="relative z-10 mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          <h2 className="flex items-center gap-1.5 text-sm font-black text-rose-100">
+            <Crosshair className="h-4 w-4 shrink-0 text-rose-400" />
+            {t('game_mazemind')}
+          </h2>
+          <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-bold text-rose-200">
+            {t('tt_level_n')} {dNum(selLevel)}-{dNum(selMission + 1)} · {t(`tt_kind_${kind}` as never)}
+          </span>
+          {hud && kind === 'clear' && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-white/15 bg-white/5 px-2 py-0.5 text-[11px] font-bold text-white/80">
+              {t('tt_hud_wave')} {dNum(hud.wave)}/{dNum(hud.waves)} · 🤖 {dNum(hud.left)} {t('tt_hud_left')}
+            </span>
+          )}
+          {hud && kind === 'survive' && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/25 bg-sky-500/10 px-2 py-0.5 text-[11px] font-bold text-sky-200">
+              <Timer className="h-3 w-3" /> {dNum(hud.timeLeft)}s
+            </span>
+          )}
+          {hud && kind === 'siege' && hud.genFrac >= 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-bold text-rose-200">
+              🏗 {dNum(Math.ceil(hud.genFrac * 100))}%
+            </span>
+          )}
+          {hud && hud.shield && (
+            <span className="tt-pulse inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] font-bold text-sky-300">
+              <Shield className="h-3 w-3" />
+            </span>
+          )}
+          <span className="ms-auto flex items-center gap-2">
+            <Button
+              variant="ghost" size="icon"
+              className="h-8 w-8 text-rose-200 hover:bg-white/10 hover:text-rose-100"
+              aria-label={t('tt_paused')} title={t('tt_paused')}
+              onClick={() => pauseRef.current()}
+            >
+              <Pause className="h-4 w-4" />
+            </Button>
+            <span className="text-end">
+              <span className="block text-[9px] uppercase tracking-wide text-rose-200/60">{t('score')}</span>
+              <span className="gold-text block text-xl font-black leading-none sm:text-2xl">{dNum(hud?.score ?? 0)}</span>
+            </span>
+          </span>
+        </div>
+
+        {/* boss hp bar */}
+        {hud && hud.bossFrac >= 0 && (
+          <div className="relative z-10 mb-1.5">
+            <div className="flex items-center justify-between text-[10px] font-black text-rose-300">
+              <span>💀 {t('tt_boss_name')}</span><span>{dNum(Math.ceil(hud.bossFrac * 100))}%</span>
+            </div>
+            <div className="mt-0.5 h-2.5 overflow-hidden rounded-full border border-rose-500/40 bg-black/60">
+              <div className="h-full rounded-full bg-gradient-to-r from-rose-600 to-rose-400 transition-all" style={{ width: `${hud.bossFrac * 100}%` }} />
+            </div>
+          </div>
+        )}
+
+        {/* arena */}
+        <div
+          className="relative mx-auto w-full touch-none select-none"
+          style={{ aspectRatio: `${VIEW_W} / ${VIEW_H}`, width: portrait ? 'min(100%, calc(46dvh * 1.6667))' : undefined }}
+          role="application"
+          aria-label={`${t('game_mazemind')} — ${t('game_mazemind_desc')}`}
+        >
+          <canvas
+            key={`${runKey}`}
+            ref={canvasRef}
+            className="absolute inset-0 h-full w-full rounded-2xl border border-rose-500/30 bg-[#070b14]"
+            style={{ touchAction: 'none' }}
+            onPointerDown={onCanvasPointerDown}
+            onPointerMove={onCanvasPointerMove}
+            onPointerUp={onCanvasPointerUp}
+            onPointerCancel={onCanvasPointerUp}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+
+          {/* touch action buttons */}
+          {hasTouch && phase === 'playing' && (
+            <>
+              <button
+                type="button"
+                aria-label={t('tt_fire')}
+                className="absolute bottom-3 end-3 z-20 grid h-[68px] w-[68px] touch-none select-none place-items-center rounded-full border-2 border-rose-400/70 bg-rose-500/20 text-rose-100 shadow-lg shadow-black/50 backdrop-blur-sm active:bg-rose-500/50"
+                onPointerDown={(e) => { e.preventDefault(); fireBtnRef.current = true; }}
+                onPointerUp={() => { fireBtnRef.current = false; }}
+                onPointerCancel={() => { fireBtnRef.current = false; }}
+                onPointerLeave={() => { fireBtnRef.current = false; }}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <Zap className="h-8 w-8" fill="currentColor" />
+              </button>
+              <button
+                type="button"
+                aria-label={t('tt_special_btn')}
+                className={`absolute bottom-[104px] end-5 z-20 grid h-14 w-14 touch-none select-none place-items-center rounded-full border-2 text-xs font-black shadow-lg shadow-black/50 backdrop-blur-sm active:scale-95 ${hud && hud.specialPct >= (gRef.current?.params.blink ? 40 : 100) ? 'border-amber-300/80 bg-amber-500/25 text-amber-100' : 'border-white/20 bg-black/50 text-white/40'}`}
+                onPointerDown={(e) => { e.preventDefault(); playerSpecialPublic(); }}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <span className="leading-none">{hud ? dNum(hud.specialPct) : '0'}</span>
+                <span className="text-[7px] uppercase">{t('tt_special_btn')}</span>
+              </button>
+              {gRef.current?.params.blink && (
+                <p className="absolute bottom-1 start-3 z-20 rounded bg-black/50 px-1.5 py-0.5 text-[8px] text-white/60">{t('tt_special_blink_hint')}</p>
+              )}
+            </>
+          )}
+
+          {/* portrait touch deck lives OUTSIDE the arena (see below) */}
+
+          {/* banner */}
+          {banner && phase === 'banner' && (
+            <div key={banner.key} className="pointer-events-none absolute inset-0 z-30 grid place-items-center">
+              <div className="tt-banner text-center">
+                <div className={`text-3xl font-black drop-shadow-[0_0_18px_rgba(244,63,94,0.6)] sm:text-4xl ${banner.danger ? 'text-rose-400' : 'gold-text'}`}>{banner.text}</div>
+                {banner.sub && <div className="mt-1 text-sm font-bold text-rose-200/80">{banner.sub}</div>}
+              </div>
+            </div>
+          )}
+
+          {/* overheated hint */}
+          {hud?.overheated && phase === 'playing' && (
+            <div className="pointer-events-none absolute start-1/2 top-3 z-20 -translate-x-1/2 rounded-full border border-rose-500/40 bg-black/70 px-3 py-1 text-[11px] font-black text-rose-300">
+              🔥 {t('tt_overheated')}
+            </div>
+          )}
+
+          {/* bars overlay: hull / heat / energy */}
+          {hud && (
+            <div className="pointer-events-none absolute bottom-2 start-2 z-10 w-40 space-y-1 sm:w-52">
+              <Bar label={t('tt_hud_hull')} value={hud.hp} max={hud.maxHp} color="#34d399" heart />
+              <Bar label={t('tt_hud_heat')} value={hud.heat} max={100} color={hud.overheated ? '#f87171' : '#fbbf24'} />
+              <Bar label={t('tt_hud_energy')} value={hud.specialPct} max={100} color="#38bdf8" />
+            </div>
+          )}
+
+          {/* pause overlay */}
+          {phase === 'paused' && (
+            <div className="absolute inset-0 z-30 grid place-items-center rounded-2xl bg-black/70 backdrop-blur-sm">
+              <div className="animate-pop w-full max-w-[280px] space-y-3 rounded-2xl border border-rose-500/25 bg-[#0a0f1e]/95 p-5 text-center">
+                <Pause className="mx-auto h-8 w-8 text-rose-400" />
+                <p className="text-lg font-black text-rose-100">{t('tt_paused')}</p>
+                <div className="grid gap-2">
+                  <Button className="glow-gold" onClick={() => pauseRef.current()}>
+                    <Play className="me-1 h-4 w-4" /> {t('tt_resume')}
+                  </Button>
+                  <Button variant="outline" onClick={retry}>{t('tt_restart')}</Button>
+                  <Button variant="outline" onClick={toLevelMap}>{t('tt_quit_map')}</Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* mission result panel */}
+          {result && phase === 'won' && (
+            <div className="absolute inset-0 z-30 grid place-items-center overflow-y-auto rounded-2xl bg-black/75 p-3 backdrop-blur-sm">
+              <div className="animate-pop w-full max-w-[340px] space-y-3 rounded-2xl border border-emerald-500/30 bg-[#0a0f1e]/95 p-5 text-center">
+                <p className="text-3xl">🎖️</p>
+                <h3 className="gold-text text-xl font-black">{t('tt_mission_complete')}</h3>
+                <StarsRow stars={result.r.stars} labels={[t('tt_star_clear'), t('tt_star_clean'), t('tt_star_fast')]} dNum={dNum} />
+                <div className="flex items-center justify-center gap-2 text-sm font-bold">
+                  <span className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-400">+{dNum(result.money)} 💰 {t('tt_money')}</span>
+                  <span className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-emerald-400">+{dNum(result.xp)} ✦</span>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {result.firstClear ? t('tt_first_clear') : t('tt_replay_reward')}
+                  {result.newStars > 0 && <> · ⭐×{dNum(result.newStars)} {t('tt_star_bonus')}</>}
+                </p>
+                {result.rewards && (
+                  <p className="text-[11px] font-bold text-amber-300">
+                    {t('tt_platform_rewards')}: +{dNum(result.rewards.coins)} 🪙 · +{dNum(result.rewards.xp)} ✦
+                  </p>
+                )}
+                {!result.rewards && !useApp.getState().user && <p className="text-[10px] text-muted-foreground">{t('tt_guest_local')}</p>}
+                <div className="grid gap-2 pt-1">
+                  {selMission + 1 < count ? (
+                    <Button className="glow-gold bg-rose-600 text-white hover:bg-rose-500" onClick={() => deploy(selLevel, selMission + 1)}>
+                      {t('tt_next_mission')} <Play className="ms-1 h-4 w-4" />
+                    </Button>
+                  ) : null}
+                  <Button variant="outline" onClick={retry}>{t('tt_retry')}</Button>
+                  <Button variant="outline" onClick={toLevelMap}>{t('tt_to_map')}</Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* mission failed panel */}
+          {result && phase === 'lost' && (
+            <div className="absolute inset-0 z-30 grid place-items-center rounded-2xl bg-black/75 p-3 backdrop-blur-sm">
+              <div className="animate-pop w-full max-w-[300px] space-y-3 rounded-2xl border border-rose-500/30 bg-[#0a0f1e]/95 p-5 text-center">
+                <p className="text-3xl">💥</p>
+                <h3 className="text-xl font-black text-rose-300">{t('tt_mission_failed')}</h3>
+                <p className="text-[11px] text-muted-foreground">🤖 {dNum(result.r.kills)} · ⏱ {dNum(Math.round(result.r.timeMs / 1000))}s</p>
+                <div className="grid gap-2 pt-1">
+                  <Button className="glow-gold bg-rose-600 text-white hover:bg-rose-500" onClick={retry}>{t('tt_retry')}</Button>
+                  <Button variant="outline" onClick={toLevelMap}>{t('tt_to_map')}</Button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* portrait touch control deck — big thumb-friendly pads under the arena */}
+        {portrait && phase === 'playing' && (
+          <div className="mx-auto mt-auto flex w-full max-w-[420px] select-none items-end justify-between gap-3 px-3 pb-1 pt-3" style={{ touchAction: 'none' }}>
+            <div
+              role="application"
+              aria-label={t('tt_move')}
+              className="relative grid h-[104px] w-[104px] touch-none place-items-center rounded-full border-2 border-white/15 bg-white/5 text-white/50 shadow-lg shadow-black/40"
+              onPointerDown={onPadDown}
+              onPointerMove={onPadMove}
+              onPointerUp={onPadUp}
+              onPointerCancel={onPadUp}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <span className="h-11 w-11 rounded-full border border-white/20 bg-white/10" />
+              <span className="absolute bottom-1 text-[8px] font-bold tracking-widest">{t('tt_move')}</span>
+            </div>
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                aria-label={t('tt_special_btn')}
+                className={`grid h-14 w-14 touch-none select-none place-items-center rounded-full border-2 text-[10px] font-black shadow-lg shadow-black/50 active:scale-95 ${hud && hud.specialPct >= (gRef.current?.params.blink ? 40 : 100) ? 'border-amber-300/80 bg-amber-500/25 text-amber-100' : 'border-white/20 bg-black/50 text-white/40'}`}
+                onPointerDown={(e) => { e.preventDefault(); playerSpecialPublic(); }}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                {hud ? dNum(hud.specialPct) : '۰'}
+              </button>
+              <button
+                type="button"
+                aria-label={t('tt_fire')}
+                className="grid h-[76px] w-[76px] touch-none select-none place-items-center rounded-full border-2 border-rose-400/70 bg-rose-500/25 text-rose-100 shadow-lg shadow-black/50 active:bg-rose-500/60"
+                onPointerDown={(e) => { e.preventDefault(); fireBtnRef.current = true; }}
+                onPointerUp={() => { fireBtnRef.current = false; }}
+                onPointerCancel={() => { fireBtnRef.current = false; }}
+                onPointerLeave={() => { fireBtnRef.current = false; }}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                <Zap className="h-9 w-9" fill="currentColor" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* control hint */}
+        <p className="mt-2 text-center text-[10px] text-muted-foreground">
+          <span className="hidden sm:inline">{t('tt_keys_hint')}</span>
+          <span className="sm:hidden">{t('tt_touch_hint')}</span>
+        </p>
+      </div>
+
+      {/* shared royal modal on LEVEL completion */}
+      <ArcadeResultModal
+        open={!!levelModal}
+        title={`🏆 ${t('tt_level_complete')} — ${t('tt_level_n')} ${dNum(selLevel)}`}
+        subtitle={levelModal ? `⭐ ${dNum(levelModal.stars)}/${dNum(levelModal.starsMax)} · +${dNum(levelModal.money)} 💰 ${t('tt_money')}${save.driverLevel < (saveRef.current.driverLevel) ? '' : ''}` : undefined}
+        score={levelModal?.score ?? 0}
+        rewards={levelModal?.rewards ?? null}
+        emoji="🛡️"
+        onAgain={() => {
+          const next = selLevel < 40 ? selLevel + 1 : selLevel;
+          setLevelModal(null);
+          setSelLevel(next);
+          setScreen(next === selLevel + 1 ? 'level' : 'levels');
+          sfx.click();
+        }}
+        onExit={() => { setLevelModal(null); toLevelMap(); }}
+      />
+    </Shell>
+  );
+}
+
+/* ============================== subcomponents ============================== */
+
+function Shell({ children, rtl, onExit }: { children: React.ReactNode; rtl: boolean; onExit: () => void }) {
+  void onExit;
+  return (
+    <div dir={rtl ? 'rtl' : 'ltr'} className="relative z-10">
+      <style>{TT_CSS}</style>
+      {children}
+    </div>
+  );
+}
+
+function Bar({ label, value, max, color, heart }: { label: string; value: number; max: number; color: string; heart?: boolean }) {
+  const pct = clamp((value / Math.max(1, max)) * 100, 0, 100);
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="w-11 shrink-0 text-end text-[8px] font-bold text-white/60">{label}</span>
+      <div className="h-2 flex-1 overflow-hidden rounded-full border border-white/15 bg-black/60">
+        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+      </div>
+      {heart ? <Heart className="h-2.5 w-2.5 text-emerald-400" fill="currentColor" /> : null}
+    </div>
+  );
+}
+
+function StarsRow({ stars, labels, dNum }: { stars: number; labels: string[]; dNum: (n: number) => string }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-center gap-1.5">
+        {[0, 1, 2].map((i) => (
+          <Star
+            key={i}
+            className={`h-8 w-8 ${i < stars ? 'animate-pop text-amber-400' : 'text-white/15'}`}
+            fill="currentColor"
+            style={i < stars ? { animationDelay: `${i * 180}ms` } : undefined}
+          />
+        ))}
+      </div>
+      <div className="space-y-0.5 text-[9.5px] text-muted-foreground">
+        {labels.map((l, i) => (
+          <p key={i} className={i < stars ? 'text-amber-300/80' : ''}>
+            {i < stars ? '★' : '☆'} {l} {i === 2 && stars < 3 ? `(${tStatic('tt_hud_time')})` : ''}
+            {i === 2 ? '' : ''}
+          </p>
+        ))}
+      </div>
+      <span className="hidden">{dNum(0)}</span>
+    </div>
+  );
+}
+
+/** CSS-art top view tank for the garage (reflects color + barrel + glow). */
+export function TankArt({ tank, selected }: { tank: TankSpec; selected: boolean }) {
+  const barrelLen = tank.barrel === 'heavy' || tank.barrel === 'prime' ? 22 : tank.barrel === 'mortar' ? 16 : 19;
+  return (
+    <div
+      className="relative h-16 w-16 shrink-0 rounded-xl border bg-black/60"
+      style={{
+        borderColor: selected ? tank.glow : `${tank.color}55`,
+        boxShadow: selected ? `0 0 18px ${tank.glow}66, inset 0 0 12px ${tank.color}22` : `inset 0 0 10px ${tank.color}18`,
+      }}
+      aria-hidden
+    >
+      {/* treads */}
+      <div className="absolute left-1.5 right-1.5 top-1.5 h-2.5 rounded-full bg-slate-800 ring-1 ring-slate-600" />
+      <div className="absolute bottom-1.5 left-1.5 right-1.5 h-2.5 rounded-full bg-slate-800 ring-1 ring-slate-600" />
+      {/* hull */}
+      <div
+        className="absolute inset-x-2.5 top-[22px] bottom-[22px] rounded-md"
+        style={{ background: `linear-gradient(135deg, ${tank.color}, #1e293b 75%)`, boxShadow: `inset 0 0 6px ${tank.glow}55` }}
+      />
+      {/* turret */}
+      <div className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full ring-2" style={{ background: tank.color, boxShadow: `0 0 10px ${tank.glow}88`, borderColor: tank.glow, color: tank.glow } as React.CSSProperties} />
+      {/* barrel (rotated 45°) */}
+      <div
+        className="absolute left-1/2 top-1/2 h-[7px] origin-left rounded-full"
+        style={{
+          width: barrelLen,
+          transform: 'rotate(-40deg) translateY(-50%)',
+          background: `linear-gradient(90deg, ${tank.glow}, ${tank.color})`,
+          boxShadow: `0 0 8px ${tank.glow}77`,
+        }}
+      />
+      {/* special glow */}
+      {selected && (
+        <div className="absolute inset-0 animate-pulse rounded-xl" style={{ boxShadow: `inset 0 0 16px ${tank.glow}55` }} />
+      )}
+      <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 rounded bg-black/80 px-1 text-[8px] font-black" style={{ color: tank.glow }}>
+        {tank.barrel}
+      </span>
+    </div>
+  );
+}
+
+/* ============================== styling ============================== */
+
+const TT_CSS = `
+.tt-shell{background:
+  radial-gradient(110% 80% at 50% -10%, rgba(244,63,94,.10), transparent 55%),
+  radial-gradient(130% 110% at 50% 115%, rgba(56,189,248,.08), transparent 60%),
+  linear-gradient(180deg,#0a0f1e 0%,#070b16 55%,#050810 100%);}
+.tt-banner{animation:tt-banner 1.5s cubic-bezier(.2,1.3,.4,1) both;}
+@keyframes tt-banner{0%{opacity:0;transform:scale(.55)}18%{opacity:1;transform:scale(1.08)}30%{transform:scale(1)}82%{opacity:1}100%{opacity:0;transform:scale(1.05)}}
+.tt-pulse{animation:tt-pulse 1.6s ease-in-out infinite;}
+@keyframes tt-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.tt-banner{animation:tt-fade .4s ease both}.tt-pulse{animation:none}}
+@keyframes tt-fade{from{opacity:0}to{opacity:1}}
+`;
+
+/* client-only default (SSR-safe) */
+function defaultClientSave(): TTSave {
+  return {
+    v: 1,
+    money: 120,
+    driverLevel: 1,
+    driverXp: 0,
+    levels: {},
+    ownedTanks: ['rustbucket'],
+    upgrades: {},
+    selectedTank: 'rustbucket',
+    stats: { missions: 0, kills: 0, bossKills: 0, deaths: 0, bestScore: 0, perfect: 0 },
+  };
+}
+
+/* static t() bridge for subcomponents outside hooks (label only) */
+function tStatic(key: string): string {
+  try { return useApp.getState().t(key as never) || key; } catch { return key; }
+}

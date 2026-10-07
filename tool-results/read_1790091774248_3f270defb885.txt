@@ -1,0 +1,1623 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * MindTankGame — "Mind Tank" (تانک اندیشه)
+     5→ *
+     6→ * A modernized, family-friendly homage to Think Tank (2000) by The Code Zone:
+     7→ * one elegant amber tank versus ten "rogue duelist drones" with escalating
+     8→ * firepower and intelligence (waves of 2 / 2 / 3 / 3). Signature mechanic:
+     9→ * your glowing logic pulses bounce off walls TWICE — bank shots are the art
+    10→ * of the duel. Drone plasma does not bounce. No blood, no humans: deactivated
+    11→ * drones spark and power down. Includes insight-cell pickups (shield / rapid
+    12→ * / repair), 4 rotating neon arenas, wave banners, a DOM HUD, pause, and the
+    13→ * shared arcade economy (useArcadeFinish('mazemind')).
+    14→ *
+    15→ * Controls — desktop: WASD/arrows move, mouse aims, click/Space fires, Esc
+    16→ * pauses. Touch: left half of the arena = floating move stick, right half =
+    17→ * drag to aim & fire, plus an auto-aim fire button. Both schemes are live at
+    18→ * once; keyboard-only players get a lead-predicting auto-aim turret.
+    19→ */
+    20→
+    21→import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
+    22→import { useApp } from '@/store/app';
+    23→import { localizeDigits } from '@/lib/i18n';
+    24→import { sfx } from '@/lib/sound';
+    25→import { useArcadeFinish, ArcadeResultModal } from '@/lib/arcade-client';
+    26→import { Button } from '@/components/ui/button';
+    27→import { Brain, Crosshair, Heart, Move, Pause, Play, Shield, Trophy, X, Zap } from 'lucide-react';
+    28→import { MM_ARENA_H, MM_ARENA_W, mmArenaForWave, type MMWall } from '@/lib/game/mazemind-arenas';
+    29→
+    30→/* ============================== tuning ================================= */
+    31→/* All speeds are "frame units" at the 60 fps reference step (step = dt/16.67). */
+    32→
+    33→const ARENA_W = MM_ARENA_W;
+    34→const ARENA_H = MM_ARENA_H;
+    35→const PAD = 16; // arena boundary inset
+    36→
+    37→const PLAYER_R = 13;
+    38→const PLAYER_SPEED = 3.3; // ≈198 px/s — always at least as fast as any single drone
+    39→const PULSE_SPEED = 7.4; // logic pulse
+    40→const PULSE_R = 5;
+    41→const PULSE_LIFE = 3800; // ms
+    42→const PULSE_BOUNCES = 2; // the signature: bank twice, third wall contact fizzles
+    43→const DRONE_R = 15;
+    44→const PLASMA_R = 5.5;
+    45→
+    46→const FIRE_CD = 345; // ms between logic pulses
+    47→const RAPID_CD = 150; // while Rapid Logic is active
+    48→const INV_MS = 1600; // post-hit invulnerability
+    49→const SHIELD_MS = 15000;
+    50→const RAPID_MS = 10000;
+    51→const PICKUP_LIFE = 12000;
+    52→const PICKUP_CHANCE = 0.45;
+    53→
+    54→const WAVES = [2, 2, 3, 3] as const; // 10 duelist drones total
+    55→const TIER_START = [1, 3, 5, 8] as const;
+    56→
+    57→const AGGRO = 460; // LOS sight range
+    58→const FIRE_RANGE = 560;
+    59→const KEEP = 235; // preferred engage distance
+    60→const DODGE_RANGE = 170;
+    61→const DODGE_PERP = 30; // pulse passes this close → strafe
+    62→
+    63→const SCORE_PICKUP = 25;
+    64→const SCORE_WAVE = 100;
+    65→const SCORE_PERFECT = 200;
+    66→const SCORE_VICTORY = 400;
+    67→
+    68→const BEST_KEY = 'doi_mazemind_best';
+    69→
+    70→/** Per-tier drone spec — tier 1 is a gentle patrol lamp, tier 10 a duelist. */
+    71→function droneSpec(tier: number) {
+    72→  return {
+    73→    speed: 1.5 + tier * 0.18, // t1 ≈ 102 px/s … t10 ≈ 198 px/s
+    74→    fireMs: Math.max(760, 2500 - tier * 165),
+    75→    plasma: 4.4 + tier * 0.34,
+    76→    hp: tier <= 3 ? 1 : tier <= 7 ? 2 : 3,
+    77→    lead: tier < 4 ? 0 : Math.min(1, (tier - 3) * 0.15), // shot lead prediction
+    78→    aimMs: Math.max(280, 640 - tier * 38), // telegraphed wind-up before firing
+    79→    dodge: tier >= 6, // strafes when your pulse is about to connect
+    80→  };
+    81→}
+    82→
+    83→const DRONE_COLORS = ['#a3e635', '#4ade80', '#2dd4bf', '#38bdf8', '#818cf8', '#a78bfa', '#c084fc', '#e879f9', '#fb923c', '#f43f5e'];
+    84→
+    85→/* ============================== types ================================== */
+    86→
+    87→type Phase = 'intro' | 'playing' | 'banner' | 'waveclear' | 'paused' | 'over';
+    88→type PickupKind = 'shield' | 'rapid' | 'repair';
+    89→
+    90→interface Pulse {
+    91→  x: number; y: number; vx: number; vy: number; r: number;
+    92→  life: number; bounces: number; friendly: boolean; color: string;
+    93→}
+    94→interface Drone {
+    95→  id: number; tier: number; x: number; y: number; vx: number; vy: number;
+    96→  hp: number; maxHp: number; state: 'spawn' | 'patrol' | 'chase' | 'aim';
+    97→  spawnT: number; fireT: number; aimT: number; losLost: number; stuckT: number;
+    98→  bodyAng: number; gunAng: number; wp: { x: number; y: number };
+    99→  orbitDir: number; dodgeT: number; dodgeAng: number; flashT: number; spin: number;
+   100→}
+   101→interface Pickup { id: number; x: number; y: number; kind: PickupKind; t: number; life: number }
+   102→interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; c: string; r: number }
+   103→interface Pop { x: number; y: number; txt: string; c: string; life: number; max: number }
+   104→
+   105→interface Game {
+   106→  phase: Phase;
+   107→  walls: MMWall[];
+   108→  wave: number; robotsDown: number; score: number; hearts: number;
+   109→  shots: number; hits: number; hitThisWave: boolean;
+   110→  bannerT: number; nextWaveT: number; pendingVictory: boolean;
+   111→  px: number; py: number; pvx: number; pvy: number;
+   112→  hullAng: number; gunAng: number;
+   113→  fireT: number; invT: number; shield: number; rapid: number; shake: number;
+   114→  keys: Set<string>;
+   115→  aim: { x: number; y: number }; aimMode: 'mouse' | 'manual' | 'auto';
+   116→  stick: { active: boolean; id: number; ox: number; oy: number; dx: number; dy: number };
+   117→  drones: Drone[]; pulses: Pulse[]; pickups: Pickup[]; parts: Part[]; pops: Pop[];
+   118→  time: number;
+   119→}
+   120→
+   121→/* ============================ math helpers ============================= */
+   122→
+   123→const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+   124→
+   125→function angLerp(a: number, b: number, k: number) {
+   126→  const d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+   127→  return a + d * k;
+   128→}
+   129→
+   130→/** Circle vs axis-aligned rect: push-out normal + penetration (null = miss). */
+   131→function circleRect(px: number, py: number, r: number, w: MMWall) {
+   132→  const cx = clamp(px, w.x, w.x + w.w);
+   133→  const cy = clamp(py, w.y, w.y + w.h);
+   134→  const dx = px - cx;
+   135→  const dy = py - cy;
+   136→  const d2 = dx * dx + dy * dy;
+   137→  if (d2 >= r * r) return null;
+   138→  if (d2 > 1e-6) {
+   139→    const d = Math.sqrt(d2);
+   140→    return { nx: dx / d, ny: dy / d, pen: r - d };
+   141→  }
+   142→  const l = px - w.x;
+   143→  const rt = w.x + w.w - px;
+   144→  const t = py - w.y;
+   145→  const b = w.y + w.h - py;
+   146→  const m = Math.min(l, rt, t, b);
+   147→  if (m === l) return { nx: -1, ny: 0, pen: r + l };
+   148→  if (m === rt) return { nx: 1, ny: 0, pen: r + rt };
+   149→  if (m === t) return { nx: 0, ny: -1, pen: r + t };
+   150→  return { nx: 0, ny: 1, pen: r + b };
+   151→}
+   152→
+   153→/** Liang–Barsky segment vs AABB — used for drone line-of-sight. */
+   154→function segHitsRect(x1: number, y1: number, x2: number, y2: number, w: MMWall) {
+   155→  let t0 = 0;
+   156→  let t1 = 1;
+   157→  const dx = x2 - x1;
+   158→  const dy = y2 - y1;
+   159→  const p = [-dx, dx, -dy, dy];
+   160→  const q = [x1 - w.x, w.x + w.w - x1, y1 - w.y, w.y + w.h - y1];
+   161→  for (let i = 0; i < 4; i++) {
+   162→    if (p[i] === 0) {
+   163→      if (q[i] < 0) return false;
+   164→      continue;
+   165→    }
+   166→    const r = q[i] / p[i];
+   167→    if (p[i] < 0) {
+   168→      if (r > t1) return false;
+   169→      if (r > t0) t0 = r;
+   170→    } else {
+   171→      if (r < t0) return false;
+   172→      if (r < t1) t1 = r;
+   173→    }
+   174→  }
+   175→  return true;
+   176→}
+   177→
+   178→function hasLOS(x1: number, y1: number, x2: number, y2: number, walls: MMWall[]) {
+   179→  for (const w of walls) if (segHitsRect(x1, y1, x2, y2, w)) return false;
+   180→  return true;
+   181→}
+   182→
+   183→function pointFree(x: number, y: number, r: number, walls: MMWall[]) {
+   184→  for (const w of walls) if (circleRect(x, y, r, w)) return false;
+   185→  return true;
+   186→}
+   187→
+   188→/** Push a circle body out of every wall; damp velocity into surfaces (e = bounce). */
+   189→function resolveWalls(x: number, y: number, r: number, vx: number, vy: number, e: number, walls: MMWall[]) {
+   190→  for (const w of walls) {
+   191→    const c = circleRect(x, y, r, w);
+   192→    if (!c) continue;
+   193→    x += c.nx * c.pen;
+   194→    y += c.ny * c.pen;
+   195→    const vn = vx * c.nx + vy * c.ny;
+   196→    if (vn < 0) {
+   197→      vx -= (1 + e) * vn * c.nx;
+   198→      vy -= (1 + e) * vn * c.ny;
+   199→    }
+   200→  }
+   201→  return { x, y, vx, vy };
+   202→}
+   203→
+   204→/** Keep a body inside the arena frame; e = 1 gives a clean pulse bounce. */
+   205→function resolveBounds(x: number, y: number, r: number, vx: number, vy: number, e: number) {
+   206→  let hit = false;
+   207→  if (x < PAD + r) { x = PAD + r; if (vx < 0) { vx = -vx * e; hit = true; } }
+   208→  if (x > ARENA_W - PAD - r) { x = ARENA_W - PAD - r; if (vx > 0) { vx = -vx * e; hit = true; } }
+   209→  if (y < PAD + r) { y = PAD + r; if (vy < 0) { vy = -vy * e; hit = true; } }
+   210→  if (y > ARENA_H - PAD - r) { y = ARENA_H - PAD - r; if (vy > 0) { vy = -vy * e; hit = true; } }
+   211→  return { x, y, vx, vy, hit };
+   212→}
+   213→
+   214→/** Intercept angle at a moving target for a projectile of `speed` (per frame). */
+   215→function interceptAngle(sx: number, sy: number, tx: number, ty: number, tvx: number, tvy: number, speed: number) {
+   216→  const dx = tx - sx;
+   217→  const dy = ty - sy;
+   218→  const a = tvx * tvx + tvy * tvy - speed * speed;
+   219→  const b = 2 * (dx * tvx + dy * tvy);
+   220→  const c = dx * dx + dy * dy;
+   221→  let t = -1;
+   222→  if (Math.abs(a) < 1e-4) {
+   223→    if (Math.abs(b) > 1e-4) t = -c / b;
+   224→  } else {
+   225→    const disc = b * b - 4 * a * c;
+   226→    if (disc >= 0) {
+   227→      const sq = Math.sqrt(disc);
+   228→      const t1 = (-b - sq) / (2 * a);
+   229→      const t2 = (-b + sq) / (2 * a);
+   230→      t = Math.min(t1, t2);
+   231→      if (t < 0) t = Math.max(t1, t2);
+   232→    }
+   233→  }
+   234→  if (!Number.isFinite(t) || t < 0) t = Math.hypot(dx, dy) / speed;
+   235→  t = Math.min(t, 400); // sanity bound; real intercepts are far below this
+   236→  return Math.atan2(dy + tvy * t, dx + tvx * t);
+   237→}
+   238→
+   239→function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+   240→  const rad = Math.min(r, w / 2, h / 2);
+   241→  ctx.beginPath();
+   242→  ctx.moveTo(x + rad, y);
+   243→  ctx.arcTo(x + w, y, x + w, y + h, rad);
+   244→  ctx.arcTo(x + w, y + h, x, y + h, rad);
+   245→  ctx.arcTo(x, y + h, x, y, rad);
+   246→  ctx.arcTo(x, y, x + w, y, rad);
+   247→  ctx.closePath();
+   248→}
+   249→
+   250→/* ============================== styling ================================ */
+   251→
+   252→const MT_CSS = `
+   253→.mt-shell{background:
+   254→  radial-gradient(110% 80% at 50% -10%, rgba(251,191,36,.08), transparent 55%),
+   255→  radial-gradient(130% 110% at 50% 115%, rgba(56,189,248,.10), transparent 60%),
+   256→  linear-gradient(180deg,#0a0f1e 0%,#070b16 55%,#050810 100%);}
+   257→.mt-banner{animation:mt-banner 1.55s cubic-bezier(.2,1.3,.4,1) both;}
+   258→@keyframes mt-banner{0%{opacity:0;transform:scale(.55)}18%{opacity:1;transform:scale(1.08)}30%{transform:scale(1)}82%{opacity:1}100%{opacity:0;transform:scale(1.05)}}
+   259→.mt-pulse{animation:mt-pulse 1.6s ease-in-out infinite;}
+   260→@keyframes mt-pulse{0%,100%{opacity:.55}50%{opacity:1}}
+   261→@media (prefers-reduced-motion:reduce){.mt-banner{animation:mt-fade .4s ease both}.mt-pulse{animation:none}}
+   262→@keyframes mt-fade{from{opacity:0}to{opacity:1}}
+   263→`;
+   264→
+   265→/* ============================ component ================================ */
+   266→
+   267→export function MindTankGame({ onExit }: { onExit: () => void }) {
+   268→  const { t, locale } = useApp();
+   269→  const rtl = locale === 'fa' || locale === 'ar';
+   270→
+   271→  const { finish, rewards, lastScore, open: resultOpen, close: closeResult } = useArcadeFinish('mazemind');
+   272→
+   273→  /* ---- React mirrors of the game (HUD-only; sim lives in refs) ---- */
+   274→  const [phase, setPhase] = useState<Phase>('intro');
+   275→  const [score, setScore] = useState(0);
+   276→  const [hearts, setHearts] = useState(3);
+   277→  const [wave, setWave] = useState(1);
+   278→  const [robotsDown, setRobotsDown] = useState(0);
+   279→  const [pow, setPow] = useState({ s: 0, r: 0 });
+   280→  const [banner, setBanner] = useState<{ text: string; sub?: string; key: number } | null>(null);
+   281→  const [runBest, setRunBest] = useState(0);
+   282→  const [summary, setSummary] = useState({ robotsDown: 0, wave: 1, acc: 0 });
+   283→
+   284→  const gRef = useRef<Game | null>(null);
+   285→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   286→  const viewRef = useRef({ cssW: 640 });
+   287→  const fireMouseRef = useRef(false);
+   288→  const fireKeyRef = useRef(false);
+   289→  const fireBtnRef = useRef(false);
+   290→  const fireTouchRef = useRef(false);
+   291→  const fireTouchId = useRef(-1);
+   292→  const timersRef = useRef<number[]>([]);
+   293→  const idRef = useRef(1);
+   294→  const submittedRef = useRef(false);
+   295→  const finishRef = useRef(finish);
+   296→  const closeResultRef = useRef(closeResult);
+   297→  const bannerKeyRef = useRef(1);
+   298→
+   299→  useEffect(() => {
+   300→    finishRef.current = finish;
+   301→    closeResultRef.current = closeResult;
+   302→  });
+   303→
+   304→  /* ---- local best (persisted per device; external store keeps lint happy) ---- */
+   305→  const storedBest = useSyncExternalStore(
+   306→    () => () => undefined,
+   307→    () => {
+   308→      try {
+   309→        return Number(localStorage.getItem(BEST_KEY) || '0') || 0;
+   310→      } catch { return 0; }
+   311→    },
+   312→    () => 0,
+   313→  );
+   314→  const best = Math.max(storedBest, runBest);
+   315→
+   316→  const addTimer = (id: number) => timersRef.current.push(id);
+   317→
+   318→  /* ---- HUD helpers callable from inside the single-run loop effect ---- */
+   319→  const showBanner = useCallback((text: string, sub?: string) => {
+   320→    bannerKeyRef.current += 1;
+   321→    setBanner({ text, sub, key: bannerKeyRef.current });
+   322→  }, []);
+   323→
+   324→  /* ---- fresh run (Start / Again) ---- */
+   325→  const startRun = useCallback(() => {
+   326→    for (const id of timersRef.current) window.clearTimeout(id);
+   327→    timersRef.current = [];
+   328→    submittedRef.current = false;
+   329→    const arena = mmArenaForWave(1);
+   330→    const { t: tt, locale: lc } = useApp.getState();
+   331→    gRef.current = {
+   332→      phase: 'banner',
+   333→      walls: arena.walls,
+   334→      wave: 1, robotsDown: 0, score: 0, hearts: 3,
+   335→      shots: 0, hits: 0, hitThisWave: false,
+   336→      bannerT: 1500, nextWaveT: 0, pendingVictory: false,
+   337→      px: arena.playerSpawn.x, py: arena.playerSpawn.y, pvx: 0, pvy: 0,
+   338→      hullAng: -Math.PI / 2, gunAng: 0,
+   339→      fireT: 0, invT: 0, shield: 0, rapid: 0, shake: 0,
+   340→      keys: new Set<string>(),
+   341→      aim: { x: ARENA_W / 2, y: 40 }, aimMode: 'auto',
+   342→      stick: { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 },
+   343→      drones: [], pulses: [], pickups: [], parts: [], pops: [],
+   344→      time: 0,
+   345→    };
+   346→    fireTouchId.current = -1;
+   347→    fireMouseRef.current = false;
+   348→    fireKeyRef.current = false;
+   349→    fireBtnRef.current = false;
+   350→    fireTouchRef.current = false;
+   351→    idRef.current = 1;
+   352→    setPhase('banner');
+   353→    setScore(0);
+   354→    setHearts(3);
+   355→    setWave(1);
+   356→    setRobotsDown(0);
+   357→    setPow({ s: 0, r: 0 });
+   358→    showBanner(`${tt('mazemind_wave')} ${localizeDigits(1, lc)}`, tt('mazemind_start'));
+   359→    closeResultRef.current();
+   360→  }, [showBanner]);
+   361→
+   362→  /* ---- wave starter: rotate arena, lay drones ---- */
+   363→  const startWave = useCallback(() => {
+   364→    const g = gRef.current;
+   365→    if (!g) return;
+   366→    const arena = mmArenaForWave(g.wave);
+   367→    g.walls = arena.walls;
+   368→    g.pulses = [];
+   369→    g.pickups = [];
+   370→    g.hitThisWave = false;
+   371→    if (!pointFree(g.px, g.py, PLAYER_R + 4, g.walls)) {
+   372→      g.px = arena.playerSpawn.x;
+   373→      g.py = arena.playerSpawn.y;
+   374→      g.pvx = 0;
+   375→      g.pvy = 0;
+   376→    }
+   377→    const n = WAVES[g.wave - 1];
+   378→    const tier0 = TIER_START[g.wave - 1];
+   379→    const spots = [...arena.droneSpawns].sort(() => Math.random() - 0.5);
+   380→    const drones: Drone[] = [];
+   381→    for (let i = 0; i < n; i++) {
+   382→      const spec = droneSpec(tier0 + i);
+   383→      let spot = spots[i % spots.length];
+   384→      if (Math.hypot(spot.x - g.px, spot.y - g.py) < 240) {
+   385→        const far = spots.find((s) => Math.hypot(s.x - g.px, s.y - g.py) >= 240);
+   386→        if (far) spot = far;
+   387→      }
+   388→      drones.push({
+   389→        id: idRef.current++, tier: tier0 + i, x: spot.x, y: spot.y, vx: 0, vy: 0,
+   390→        hp: spec.hp, maxHp: spec.hp, state: 'spawn',
+   391→        spawnT: 650 + i * 180, fireT: spec.fireMs * (0.7 + Math.random() * 0.6),
+   392→        aimT: 0, losLost: 0, stuckT: 0,
+   393→        bodyAng: Math.random() * Math.PI * 2,
+   394→        gunAng: Math.atan2(g.py - spot.y, g.px - spot.x),
+   395→        wp: { x: spot.x, y: spot.y },
+   396→        orbitDir: Math.random() < 0.5 ? 1 : -1,
+   397→        dodgeT: 0, dodgeAng: 0, flashT: 0, spin: Math.random() * Math.PI * 2,
+   398→      });
+   399→    }
+   400→    g.drones = drones;
+   401→    g.phase = 'playing';
+   402→    setPhase('playing');
+   403→  }, []);
+   404→
+   405→  /* ---- run end: submit to the shared arcade economy ---- */
+   406→  const endRun = useCallback((victory: boolean) => {
+   407→    if (submittedRef.current) return;
+   408→    submittedRef.current = true;
+   409→    const g = gRef.current;
+   410→    if (!g) return;
+   411→    g.phase = 'over';
+   412→    setPhase('over');
+   413→    const acc = g.shots > 0 ? Math.round((g.hits / g.shots) * 100) : 0;
+   414→    let stored = 0;
+   415→    try { stored = Number(localStorage.getItem(BEST_KEY) || '0') || 0; } catch { /* noop */ }
+   416→    if (g.score > stored) {
+   417→      setRunBest(g.score);
+   418→      try { localStorage.setItem(BEST_KEY, String(g.score)); } catch { /* noop */ }
+   419→    }
+   420→    setSummary({ robotsDown: g.robotsDown, wave: g.wave, acc });
+   421→    if (victory) sfx.win();
+   422→    else sfx.lose();
+   423→    const finalScore = g.score;
+   424→    const meta = { robotsDown: g.robotsDown, wave: g.wave, accuracy: acc };
+   425→    addTimer(window.setTimeout(() => { void finishRef.current(finalScore, meta); }, victory ? 950 : 700));
+   426→  }, []);
+   427→
+   428→  /* ---- pause ---- */
+   429→  const togglePause = useCallback(() => {
+   430→    const g = gRef.current;
+   431→    if (!g) return;
+   432→    if (g.phase === 'playing') {
+   433→      g.phase = 'paused';
+   434→      setPhase('paused');
+   435→      sfx.click();
+   436→    } else if (g.phase === 'paused') {
+   437→      g.phase = 'playing';
+   438→      setPhase('playing');
+   439→      sfx.click();
+   440→    }
+   441→  }, []);
+   442→
+   443→  /* ====================== the simulation / render loop ==================== */
+   444→  useEffect(() => {
+   445→    const canvas = canvasRef.current;
+   446→    if (!canvas) return;
+   447→    const ctx = canvas.getContext('2d');
+   448→    if (!ctx) return;
+   449→
+   450→    /* ---- backing store sizing (device-pixel sharp) ---- */
+   451→    const resize = () => {
+   452→      const w = canvas.clientWidth || 640;
+   453→      const dpr = Math.min(2, window.devicePixelRatio || 1);
+   454→      canvas.width = Math.round(w * dpr);
+   455→      canvas.height = Math.round(w * (ARENA_H / ARENA_W) * dpr);
+   456→      viewRef.current.cssW = w;
+   457→    };
+   458→    resize();
+   459→    const ro = new ResizeObserver(resize);
+   460→    ro.observe(canvas);
+   461→
+   462→    /* ---- particle / popup factories ---- */
+   463→    const burst = (g: Game, x: number, y: number, c: string, n: number, speed: number) => {
+   464→      for (let i = 0; i < n; i++) {
+   465→        const a = Math.random() * Math.PI * 2;
+   466→        const v = speed * (0.25 + Math.random() * 0.95);
+   467→        g.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 350 + Math.random() * 550, max: 900, c, r: 1.4 + Math.random() * 2.6 });
+   468→      }
+   469→      if (g.parts.length > 260) g.parts.splice(0, g.parts.length - 260);
+   470→    };
+   471→
+   472→    const pop = (g: Game, x: number, y: number, txt: string, c: string) => {
+   473→      g.pops.push({ x, y, txt, c, life: 1150, max: 1150 });
+   474→    };
+   475→    const dNum = (n: number) => localizeDigits(n, useApp.getState().locale);
+   476→
+   477→    let lastBounceSfx = 0;
+   478→
+   479→    /* ---- drone deactivate: spark-down + score + maybe a pickup ---- */
+   480→    const deactivateDrone = (g: Game, d: Drone, idx: number) => {
+   481→      const col = DRONE_COLORS[d.tier - 1];
+   482→      burst(g, d.x, d.y, col, 16, 3.2);
+   483→      burst(g, d.x, d.y, '#fbbf24', 10, 2.2);
+   484→      const pts = 150 + g.wave * 50;
+   485→      g.score += pts;
+   486→      g.robotsDown += 1;
+   487→      setScore(g.score);
+   488→      setRobotsDown(g.robotsDown);
+   489→      pop(g, d.x, d.y - 18, `+${dNum(pts)}`, '#fbbf24');
+   490→      sfx.capture();
+   491→      if (Math.random() < PICKUP_CHANCE) {
+   492→        let px2 = d.x;
+   493→        let py2 = d.y;
+   494→        if (!pointFree(px2, py2, 12, g.walls)) {
+   495→          px2 = d.x + (Math.random() - 0.5) * 60;
+   496→          py2 = d.y + (Math.random() - 0.5) * 60;
+   497→        }
+   498→        const roll = Math.random();
+   499→        const kind: PickupKind = roll < 0.38 ? 'shield' : roll < 0.72 ? 'rapid' : 'repair';
+   500→        g.pickups.push({ id: idRef.current++, x: px2, y: py2, kind, t: 0, life: PICKUP_LIFE });
+   501→      }
+   502→      g.drones.splice(idx, 1);
+   503→      g.shake = Math.max(g.shake, 0.35);
+   504→    };
+   505→
+   506→    const hitPlayer = (g: Game) => {
+   507→      if (g.invT > 0 || g.phase !== 'playing') return;
+   508→      g.hitThisWave = true;
+   509→      burst(g, g.px, g.py, '#f87171', 14, 2.6);
+   510→      if (g.shield > 0) {
+   511→        g.shield = 0;
+   512→        setPow({ s: 0, r: g.rapid > 0 ? Math.ceil(g.rapid / 1000) : 0 });
+   513→        burst(g, g.px, g.py, '#38bdf8', 18, 3);
+   514→        g.invT = 800;
+   515→        g.shake = 0.6;
+   516→        sfx.bad();
+   517→        return;
+   518→      }
+   519→      g.hearts -= 1;
+   520→      setHearts(g.hearts);
+   521→      g.invT = INV_MS;
+   522→      g.shake = 1;
+   523→      sfx.bad();
+   524→      if (g.hearts <= 0) {
+   525→        burst(g, g.px, g.py, '#fbbf24', 34, 4.2);
+   526→        burst(g, g.px, g.py, '#fde68a', 20, 2.8);
+   527→        g.shake = 1.4;
+   528→        addTimer(window.setTimeout(() => endRun(false), 700));
+   529→      }
+   530→    };
+   531→
+   532→    /* ---------------- update: player ---------------- */
+   533→    const updatePlayer = (g: Game, step: number, dt: number) => {
+   534→      g.fireT = Math.max(0, g.fireT - dt);
+   535→      g.invT = Math.max(0, g.invT - dt);
+   536→      const before = { s: Math.ceil(g.shield / 1000), r: Math.ceil(g.rapid / 1000) };
+   537→      g.shield = Math.max(0, g.shield - dt);
+   538→      g.rapid = Math.max(0, g.rapid - dt);
+   539→      const after = { s: Math.ceil(g.shield / 1000), r: Math.ceil(g.rapid / 1000) };
+   540→      if (before.s !== after.s || before.r !== after.r) setPow({ s: after.s, r: after.r });
+   541→      g.shake = Math.max(0, g.shake - 0.03 * step);
+   542→
+   543→      let dx = 0;
+   544→      let dy = 0;
+   545→      const k = g.keys;
+   546→      if (k.has('w') || k.has('arrowup')) dy -= 1;
+   547→      if (k.has('s') || k.has('arrowdown')) dy += 1;
+   548→      if (k.has('a') || k.has('arrowleft')) dx -= 1;
+   549→      if (k.has('d') || k.has('arrowright')) dx += 1;
+   550→      if (g.stick.active) { dx += g.stick.dx; dy += g.stick.dy; }
+   551→      const m = Math.hypot(dx, dy);
+   552→      if (m > 1) { dx /= m; dy /= m; }
+   553→
+   554→      const ease = Math.min(1, 0.22 * step);
+   555→      let vx = g.pvx + (dx * PLAYER_SPEED - g.pvx) * ease;
+   556→      let vy = g.pvy + (dy * PLAYER_SPEED - g.pvy) * ease;
+   557→      let x = g.px + vx * step;
+   558→      let y = g.py + vy * step;
+   559→
+   560→      const res = resolveWalls(x, y, PLAYER_R, vx, vy, 0.15, g.walls);
+   561→      x = res.x; y = res.y; vx = res.vx; vy = res.vy;
+   562→      const b = resolveBounds(x, y, PLAYER_R, vx, vy, 0);
+   563→      x = b.x; y = b.y; vx = b.vx; vy = b.vy;
+   564→      g.px = x; g.py = y; g.pvx = vx; g.pvy = vy;
+   565→
+   566→      const spd = Math.hypot(vx, vy);
+   567→      if (spd > 0.4) g.hullAng = angLerp(g.hullAng, Math.atan2(vy, vx), Math.min(1, 0.22 * step));
+   568→      if (spd > 1.2 && Math.random() < 0.4) {
+   569→        g.parts.push({ x: x - Math.cos(g.hullAng) * 14, y: y - Math.sin(g.hullAng) * 14, vx: -vx * 0.2, vy: -vy * 0.2, life: 260, max: 260, c: '#f59e0b', r: 1.2 + Math.random() });
+   570→      }
+   571→
+   572→      /* turret aim: mouse / touch-drag point, else lead-predicting auto-aim */
+   573→      let targetAng = g.gunAng;
+   574→      if (g.aimMode === 'mouse' || g.aimMode === 'manual') {
+   575→        targetAng = Math.atan2(g.aim.y - y, g.aim.x - x);
+   576→      } else {
+   577→        let bestD = Infinity;
+   578→        let bestDrone: Drone | null = null;
+   579→        for (const d of g.drones) {
+   580→          if (d.state === 'spawn') continue;
+   581→          const dd = Math.hypot(d.x - x, d.y - y);
+   582→          const score2 = dd - (hasLOS(x, y, d.x, d.y, g.walls) ? 220 : 0);
+   583→          if (score2 < bestD) { bestD = score2; bestDrone = d; }
+   584→        }
+   585→        if (bestDrone) targetAng = interceptAngle(x, y, bestDrone.x, bestDrone.y, bestDrone.vx, bestDrone.vy, PULSE_SPEED);
+   586→      }
+   587→      g.gunAng = angLerp(g.gunAng, targetAng, Math.min(1, 0.45 * step));
+   588→
+   589→      /* fire */
+   590→      const firing = fireMouseRef.current || fireKeyRef.current || fireBtnRef.current || fireTouchRef.current;
+   591→      if (firing && g.fireT <= 0) {
+   592→        g.fireT = g.rapid > 0 ? RAPID_CD : FIRE_CD;
+   593→        const mx = x + Math.cos(g.gunAng) * (PLAYER_R + 8);
+   594→        const my = y + Math.sin(g.gunAng) * (PLAYER_R + 8);
+   595→        g.pulses.push({ x: mx, y: my, vx: Math.cos(g.gunAng) * PULSE_SPEED, vy: Math.sin(g.gunAng) * PULSE_SPEED, r: PULSE_R, life: PULSE_LIFE, bounces: 0, friendly: true, color: '#fbbf24' });
+   596→        g.shots += 1;
+   597→        burst(g, mx, my, '#fde68a', 3, 1.6);
+   598→        sfx.drop();
+   599→      }
+   600→    };
+   601→
+   602→    /* ---------------- update: drones (state machine) ---------------- */
+   603→    const newWaypoint = (g: Game, d: Drone) => {
+   604→      for (let i = 0; i < 10; i++) {
+   605→        const x = PAD + 34 + Math.random() * (ARENA_W - 2 * (PAD + 34));
+   606→        const y = PAD + 34 + Math.random() * (ARENA_H - 2 * (PAD + 34));
+   607→        if (pointFree(x, y, DRONE_R + 6, g.walls)) { d.wp = { x, y }; return; }
+   608→      }
+   609→      d.wp = { ...mmArenaForWave(g.wave).playerSpawn };
+   610→    };
+   611→
+   612→    const updateDrone = (g: Game, d: Drone, step: number, dt: number) => {
+   613→      if (d.state === 'spawn') {
+   614→        d.spawnT -= dt;
+   615→        d.spin += 0.12 * step;
+   616→        if (d.spawnT <= 0) {
+   617→          d.state = 'patrol'; // materialize: becomes vulnerable + starts hunting
+   618→          newWaypoint(g, d);
+   619→        }
+   620→        return;
+   621→      }
+   622→      const spec = droneSpec(d.tier);
+   623→      d.flashT = Math.max(0, d.flashT - dt);
+   624→      d.dodgeT = Math.max(0, d.dodgeT - dt);
+   625→      d.spin += (0.03 + d.tier * 0.004) * step;
+   626→
+   627→      const pdx = g.px - d.x;
+   628→      const pdy = g.py - d.y;
+   629→      const pd = Math.hypot(pdx, pdy) || 1;
+   630→      const los = hasLOS(d.x, d.y, g.px, g.py, g.walls);
+   631→
+   632→      /* --- transitions --- */
+   633→      if (d.state === 'patrol') {
+   634→        if (los && pd < AGGRO) d.state = 'chase';
+   635→      } else if (d.state === 'chase') {
+   636→        if (!los && pd > AGGRO) {
+   637→          d.state = 'patrol';
+   638→          newWaypoint(g, d);
+   639→        } else if (d.fireT <= 0 && los && pd < FIRE_RANGE) {
+   640→          d.state = 'aim';
+   641→          d.aimT = spec.aimMs;
+   642→          d.losLost = 0;
+   643→        }
+   644→      } else if (d.state === 'aim') {
+   645→        if (!los) {
+   646→          d.losLost += dt;
+   647→          if (d.losLost > 320) { d.state = 'chase'; d.fireT = 420; }
+   648→        } else {
+   649→          d.aimT -= dt;
+   650→          if (d.aimT <= 0) {
+   651→            const tLead = (pd / spec.plasma) * spec.lead;
+   652→            const ax = g.px + g.pvx * tLead;
+   653→            const ay = g.py + g.pvy * tLead;
+   654→            const ang = Math.atan2(ay - d.y, ax - d.x);
+   655→            const mx = d.x + Math.cos(ang) * (DRONE_R + 7);
+   656→            const my = d.y + Math.sin(ang) * (DRONE_R + 7);
+   657→            g.pulses.push({ x: mx, y: my, vx: Math.cos(ang) * spec.plasma, vy: Math.sin(ang) * spec.plasma, r: PLASMA_R, life: 5200, bounces: 0, friendly: false, color: DRONE_COLORS[d.tier - 1] });
+   658→            burst(g, mx, my, DRONE_COLORS[d.tier - 1], 4, 1.4);
+   659→            d.fireT = spec.fireMs * (0.85 + Math.random() * 0.35);
+   660→            d.state = 'chase';
+   661→          }
+   662→        }
+   663→      }
+   664→      if (d.state !== 'aim') d.fireT -= dt;
+   665→
+   666→      /* --- shot-dodge strafe (tier 6+) --- */
+   667→      if (spec.dodge && d.dodgeT <= 0) {
+   668→        for (const p of g.pulses) {
+   669→          if (!p.friendly) continue;
+   670→          const ddx = d.x - p.x;
+   671→          const ddy = d.y - p.y;
+   672→          const dist = Math.hypot(ddx, ddy);
+   673→          if (dist > DODGE_RANGE || dist < 1) continue;
+   674→          const ux = p.vx / PULSE_SPEED;
+   675→          const uy = p.vy / PULSE_SPEED;
+   676→          const closing = ux * ddx + uy * ddy;
+   677→          const perp = Math.abs(ux * ddy - uy * ddx);
+   678→          if (closing > 0 && perp < DODGE_PERP) {
+   679→            const pa = Math.atan2(p.vy, p.vx);
+   680→            d.dodgeAng = pa + (ux * ddy - uy * ddx > 0 ? 1 : -1) * (Math.PI / 2);
+   681→            d.dodgeT = 340;
+   682→            break;
+   683→          }
+   684→        }
+   685→      }
+   686→
+   687→      /* --- steering --- */
+   688→      let tx = 0;
+   689→      let ty = 0;
+   690→      let mul = 1;
+   691→      if (d.state === 'patrol') {
+   692→        const wdx = d.wp.x - d.x;
+   693→        const wdy = d.wp.y - d.y;
+   694→        const wd = Math.hypot(wdx, wdy);
+   695→        if (wd < 34) newWaypoint(g, d);
+   696→        else { tx = wdx / wd; ty = wdy / wd; mul = 0.6; }
+   697→      } else if (d.state === 'chase') {
+   698→        const ux = pdx / pd;
+   699→        const uy = pdy / pd;
+   700→        if (!los) {
+   701→          // lost sight → push toward the player but bias sideways so we slide
+   702→          // around cover instead of grinding into a concave corner (T-junctions)
+   703→          const side = d.orbitDir * 0.7;
+   704→          const ca = Math.cos(side);
+   705→          const sa = Math.sin(side);
+   706→          tx = ux * ca - uy * sa;
+   707→          ty = ux * sa + uy * ca;
+   708→        } else if (pd > KEEP + 60) { tx = ux; ty = uy; }
+   709→        else if (pd < KEEP - 70) { tx = -ux; ty = -uy; }
+   710→        else { tx = -uy * d.orbitDir; ty = ux * d.orbitDir; }
+   711→        if (Math.random() < 0.004 * step) d.orbitDir *= -1;
+   712→      } else {
+   713→        mul = 0.12; // aiming: dig in
+   714→      }
+   715→      if (d.dodgeT > 0) { tx += Math.cos(d.dodgeAng) * 1.5; ty += Math.sin(d.dodgeAng) * 1.5; }
+   716→
+   717→      const tm = Math.hypot(tx, ty);
+   718→      let vx = d.vx;
+   719→      let vy = d.vy;
+   720→      if (tm > 0.01) {
+   721→        const sp = spec.speed * mul;
+   722→        const ke = Math.min(1, 0.14 * step);
+   723→        vx += ((tx / tm) * sp - vx) * ke;
+   724→        vy += ((ty / tm) * sp - vy) * ke;
+   725→      } else {
+   726→        vx *= Math.pow(0.9, step);
+   727→        vy *= Math.pow(0.9, step);
+   728→      }
+   729→      let x = d.x + vx * step;
+   730→      let y = d.y + vy * step;
+   731→      const res = resolveWalls(x, y, DRONE_R, vx, vy, 0.1, g.walls);
+   732→      x = res.x; y = res.y; vx = res.vx; vy = res.vy;
+   733→      const b = resolveBounds(x, y, DRONE_R, vx, vy, 0);
+   734→      d.x = b.x; d.y = b.y; d.vx = b.vx; d.vy = b.vy;
+   735→
+   736→      /* anti-stall: wedged against cover (velocity ≈ 0 while trying to move)
+   737→         → drop to patrol and walk to a nearby free waypoint to break out */
+   738→      if (d.state === 'chase' || d.state === 'patrol') {
+   739→        const want = spec.speed * (d.state === 'chase' ? 1 : 0.6);
+   740→        if (Math.hypot(d.vx, d.vy) < want * 0.4) d.stuckT += dt;
+   741→        else d.stuckT = Math.max(0, d.stuckT - dt * 2);
+   742→        if (d.stuckT > 900) {
+   743→          d.stuckT = 0;
+   744→          d.state = 'patrol';
+   745→          let fled = false;
+   746→          for (let i = 0; i < 12; i++) {
+   747→            const a = Math.random() * Math.PI * 2;
+   748→            const rad = 60 + Math.random() * 180;
+   749→            const fx = clamp(d.x + Math.cos(a) * rad, PAD + 30, ARENA_W - PAD - 30);
+   750→            const fy = clamp(d.y + Math.sin(a) * rad, PAD + 30, ARENA_H - PAD - 30);
+   751→            if (pointFree(fx, fy, DRONE_R + 6, g.walls)) { d.wp = { x: fx, y: fy }; fled = true; break; }
+   752→          }
+   753→          if (!fled) newWaypoint(g, d);
+   754→        }
+   755→      } else {
+   756→        d.stuckT = 0;
+   757→      }
+   758→
+   759→      if (Math.hypot(d.vx, d.vy) > 0.25) d.bodyAng = angLerp(d.bodyAng, Math.atan2(d.vy, d.vx), Math.min(1, 0.16 * step));
+   760→
+   761→      /* gun tracks the player with tier-scaled lead */
+   762→      if (los) {
+   763→        const tLead = (pd / spec.plasma) * spec.lead;
+   764→        const ax = g.px + g.pvx * tLead;
+   765→        const ay = g.py + g.pvy * tLead;
+   766→        d.gunAng = angLerp(d.gunAng, Math.atan2(ay - d.y, ax - d.x), Math.min(1, (0.07 + d.tier * 0.02) * step));
+   767→      } else if (tm > 0.01) {
+   768→        d.gunAng = angLerp(d.gunAng, Math.atan2(vy, vx), Math.min(1, 0.08 * step));
+   769→      }
+   770→    };
+   771→
+   772→    /* ---------------- update: pulses (banked logic + plasma) ---------------- */
+   773→    const updatePulses = (g: Game, step: number, dt: number) => {
+   774→      for (let i = g.pulses.length - 1; i >= 0; i--) {
+   775→        const p = g.pulses[i];
+   776→        p.x += p.vx * step;
+   777→        p.y += p.vy * step;
+   778→        p.life -= dt;
+   779→
+   780→        /* boundary */
+   781→        const bb = resolveBounds(p.x, p.y, p.r, p.vx, p.vy, 1);
+   782→        let bounced = bb.hit;
+   783→        p.x = bb.x; p.y = bb.y; p.vx = bb.vx; p.vy = bb.vy;
+   784→
+   785→        /* walls */
+   786→        for (const w of g.walls) {
+   787→          const c = circleRect(p.x, p.y, p.r, w);
+   788→          if (!c) continue;
+   789→          p.x += c.nx * c.pen;
+   790→          p.y += c.ny * c.pen;
+   791→          const vn = p.vx * c.nx + p.vy * c.ny;
+   792→          if (vn < 0) {
+   793→            p.vx -= 2 * vn * c.nx;
+   794→            p.vy -= 2 * vn * c.ny;
+   795→            bounced = true;
+   796→          }
+   797→          break;
+   798→        }
+   799→
+   800→        if (bounced) {
+   801→          p.bounces += 1;
+   802→          burst(g, p.x, p.y, p.friendly ? '#fde68a' : p.color, 4, 1.4);
+   803→          if (p.bounces > PULSE_BOUNCES) {
+   804→            burst(g, p.x, p.y, p.friendly ? '#fbbf24' : p.color, 6, 1.6);
+   805→            g.pulses.splice(i, 1);
+   806→            continue;
+   807→          }
+   808→          if (p.friendly) {
+   809→            const now = performance.now();
+   810→            if (now - lastBounceSfx > 60) { sfx.click(); lastBounceSfx = now; }
+   811→          }
+   812→        }
+   813→
+   814→        if (p.life <= 0) { g.pulses.splice(i, 1); continue; }
+   815→
+   816→        if (p.friendly) {
+   817→          for (let j = g.drones.length - 1; j >= 0; j--) {
+   818→            const d = g.drones[j];
+   819→            if (d.state === 'spawn') continue;
+   820→            if (Math.hypot(d.x - p.x, d.y - p.y) < DRONE_R + p.r) {
+   821→              g.hits += 1;
+   822→              d.hp -= 1;
+   823→              d.flashT = 130;
+   824→              d.vx += p.vx * 0.3;
+   825→              d.vy += p.vy * 0.3;
+   826→              burst(g, p.x, p.y, DRONE_COLORS[d.tier - 1], 8, 2.2);
+   827→              g.pulses.splice(i, 1);
+   828→              if (d.hp <= 0) deactivateDrone(g, d, j);
+   829→              else sfx.chat();
+   830→              break;
+   831→            }
+   832→          }
+   833→        } else if (g.invT <= 0 && Math.hypot(g.px - p.x, g.py - p.y) < PLAYER_R + p.r) {
+   834→          g.pulses.splice(i, 1);
+   835→          hitPlayer(g);
+   836→        }
+   837→      }
+   838→    };
+   839→
+   840→    /* ---------------- update: pickups ---------------- */
+   841→    const updatePickups = (g: Game, step: number, dt: number) => {
+   842→      for (let i = g.pickups.length - 1; i >= 0; i--) {
+   843→        const p = g.pickups[i];
+   844→        p.t += dt;
+   845→        p.life -= dt;
+   846→        if (p.life <= 0) { g.pickups.splice(i, 1); continue; }
+   847→        if (g.phase !== 'playing') continue;
+   848→        if (Math.hypot(g.px - p.x, g.py - p.y) > PLAYER_R + 17) continue;
+   849→        g.score += SCORE_PICKUP;
+   850→        setScore(g.score);
+   851→        burst(g, p.x, p.y, p.kind === 'shield' ? '#38bdf8' : p.kind === 'rapid' ? '#fbbf24' : '#34d399', 12, 2);
+   852→        sfx.coin();
+   853→        if (p.kind === 'shield') {
+   854→          g.shield = SHIELD_MS;
+   855→          pop(g, p.x, p.y - 14, useApp.getState().t('mazemind_shield'), '#38bdf8');
+   856→        } else if (p.kind === 'rapid') {
+   857→          g.rapid = RAPID_MS;
+   858→          pop(g, p.x, p.y - 14, useApp.getState().t('mazemind_rapid'), '#fbbf24');
+   859→        } else {
+   860→          if (g.hearts < 4) {
+   861→            g.hearts += 1;
+   862→            setHearts(g.hearts);
+   863→            pop(g, p.x, p.y - 14, `+♥`, '#34d399');
+   864→          } else {
+   865→            g.score += 100;
+   866→            setScore(g.score);
+   867→            pop(g, p.x, p.y - 14, `+${dNum(100)}`, '#34d399');
+   868→          }
+   869→        }
+   870→        pop(g, p.x, p.y + 8, `+${dNum(SCORE_PICKUP)}`, '#e2e8f0');
+   871→        g.pickups.splice(i, 1);
+   872→      }
+   873→    };
+   874→
+   875→    /* ---------------- separation: drones ↔ drones ↔ player ---------------- */
+   876→    const separate = (g: Game) => {
+   877→      const ds = g.drones;
+   878→      for (let i = 0; i < ds.length; i++) {
+   879→        for (let j = i + 1; j < ds.length; j++) {
+   880→          const a = ds[i];
+   881→          const b = ds[j];
+   882→          const dx = b.x - a.x;
+   883→          const dy = b.y - a.y;
+   884→          const d = Math.hypot(dx, dy);
+   885→          const min = DRONE_R * 2 - 2;
+   886→          if (d < min && d > 0.01) {
+   887→            const push = (min - d) / 2;
+   888→            const nx = dx / d;
+   889→            const ny = dy / d;
+   890→            a.x -= nx * push; a.y -= ny * push;
+   891→            b.x += nx * push; b.y += ny * push;
+   892→          } else if (d <= 0.01) {
+   893→            a.x -= 1; b.x += 1;
+   894→          }
+   895→        }
+   896→        const d = ds[i];
+   897→        const dx = d.x - g.px;
+   898→        const dy = d.y - g.py;
+   899→        const dist = Math.hypot(dx, dy);
+   900→        const min = DRONE_R + PLAYER_R;
+   901→        if (dist < min && dist > 0.01) {
+   902→          const push = (min - dist) / 2;
+   903→          const nx = dx / dist;
+   904→          const ny = dy / dist;
+   905→          d.x += nx * push; d.y += ny * push;
+   906→          g.px -= nx * push; g.py -= ny * push;
+   907→        }
+   908→      }
+   909→    };
+   910→
+   911→    /* ---------------- master update ---------------- */
+   912→    const update = (dt: number, step: number) => {
+   913→      const g = gRef.current;
+   914→      if (!g) return;
+   915→      g.time += dt;
+   916→
+   917→      /* particles & popups always settle (nice during banners / game over) */
+   918→      for (let i = g.parts.length - 1; i >= 0; i--) {
+   919→        const p = g.parts[i];
+   920→        p.x += p.vx * step;
+   921→        p.y += p.vy * step;
+   922→        p.vx *= Math.pow(0.94, step);
+   923→        p.vy *= Math.pow(0.94, step);
+   924→        p.life -= dt;
+   925→        if (p.life <= 0) g.parts.splice(i, 1);
+   926→      }
+   927→      for (let i = g.pops.length - 1; i >= 0; i--) {
+   928→        const p = g.pops[i];
+   929→        p.y -= 0.45 * step;
+   930→        p.life -= dt;
+   931→        if (p.life <= 0) g.pops.splice(i, 1);
+   932→      }
+   933→
+   934→      if (g.phase === 'banner') {
+   935→        g.bannerT -= dt;
+   936→        if (g.bannerT <= 0) {
+   937→          setBanner(null);
+   938→          if (g.pendingVictory) endRun(true);
+   939→          else startWave();
+   940→        }
+   941→        return;
+   942→      }
+   943→      if (g.phase === 'waveclear') {
+   944→        g.nextWaveT -= dt;
+   945→        if (g.nextWaveT <= 0) {
+   946→          const { t: tt, locale: lc } = useApp.getState();
+   947→          if (g.wave >= WAVES.length) {
+   948→            g.score += SCORE_VICTORY;
+   949→            setScore(g.score);
+   950→            g.pendingVictory = true;
+   951→            g.phase = 'banner';
+   952→            setPhase('banner');
+   953→            g.bannerT = 1600;
+   954→            showBanner(tt('mazemind_victory'), `+${localizeDigits(SCORE_VICTORY, lc)}`);
+   955→          } else {
+   956→            g.wave += 1;
+   957→            setWave(g.wave);
+   958→            g.phase = 'banner';
+   959→            setPhase('banner');
+   960→            g.bannerT = 1500;
+   961→            showBanner(`${tt('mazemind_wave')} ${localizeDigits(g.wave, lc)}`);
+   962→          }
+   963→        }
+   964→        return;
+   965→      }
+   966→      if (g.phase !== 'playing') return;
+   967→
+   968→      updatePlayer(g, step, dt);
+   969→      updatePulses(g, step, dt);
+   970→      for (const d of g.drones) updateDrone(g, d, step, dt);
+   971→      separate(g);
+   972→      for (const d of g.drones) {
+   973→        const res = resolveWalls(d.x, d.y, DRONE_R, d.vx, d.vy, 0, g.walls);
+   974→        d.x = res.x; d.y = res.y; d.vx = res.vx; d.vy = res.vy;
+   975→      }
+   976→      updatePickups(g, step, dt);
+   977→
+   978→      /* wave cleared? */
+   979→      if (g.drones.length === 0) {
+   980→        const { t: tt, locale: lc } = useApp.getState();
+   981→        g.phase = 'waveclear';
+   982→        setPhase('waveclear');
+   983→        g.score += SCORE_WAVE;
+   984→        pop(g, ARENA_W / 2, ARENA_H / 2 - 40, `+${localizeDigits(SCORE_WAVE, lc)}`, '#fbbf24');
+   985→        if (!g.hitThisWave) {
+   986→          g.score += SCORE_PERFECT;
+   987→          pop(g, ARENA_W / 2, ARENA_H / 2, `${tt('mazemind_perfect')} +${localizeDigits(SCORE_PERFECT, lc)}`, '#34d399');
+   988→        }
+   989→        setScore(g.score);
+   990→        sfx.win();
+   991→        g.nextWaveT = 1350;
+   992→      }
+   993→    };
+   994→
+   995→    /* ------------------------------ render ------------------------------ */
+   996→    const drawGrid = (g: Game) => {
+   997→      ctx.fillStyle = '#060a14';
+   998→      ctx.fillRect(-24, -24, ARENA_W + 48, ARENA_H + 48);
+   999→      const glow = ctx.createRadialGradient(ARENA_W / 2, ARENA_H / 2, 60, ARENA_W / 2, ARENA_H / 2, 560);
+  1000→      glow.addColorStop(0, 'rgba(49,46,129,0.32)');
+  1001→      glow.addColorStop(1, 'rgba(2,6,23,0)');
+  1002→      ctx.fillStyle = glow;
+  1003→      ctx.fillRect(0, 0, ARENA_W, ARENA_H);
+  1004→      ctx.strokeStyle = 'rgba(148,163,184,0.075)';
+  1005→      ctx.lineWidth = 1;
+  1006→      ctx.beginPath();
+  1007→      for (let x = PAD; x <= ARENA_W - PAD; x += 40) { ctx.moveTo(x, PAD); ctx.lineTo(x, ARENA_H - PAD); }
+  1008→      for (let y = PAD; y <= ARENA_H - PAD; y += 40) { ctx.moveTo(PAD, y); ctx.lineTo(ARENA_W - PAD, y); }
+  1009→      ctx.stroke();
+  1010→      /* neon frame */
+  1011→      ctx.save();
+  1012→      ctx.shadowColor = 'rgba(251,191,36,0.55)';
+  1013→      ctx.shadowBlur = 14;
+  1014→      ctx.strokeStyle = 'rgba(251,191,36,0.55)';
+  1015→      ctx.lineWidth = 3;
+  1016→      rr(ctx, PAD - 9, PAD - 9, ARENA_W - 2 * (PAD - 9), ARENA_H - 2 * (PAD - 9), 18);
+  1017→      ctx.stroke();
+  1018→      ctx.restore();
+  1019→      /* walls */
+  1020→      for (const w of g.walls) {
+  1021→        rr(ctx, w.x, w.y, w.w, w.h, 7);
+  1022→        ctx.fillStyle = 'rgba(15,23,42,0.94)';
+  1023→        ctx.fill();
+  1024→        ctx.strokeStyle = 'rgba(56,189,248,0.6)';
+  1025→        ctx.lineWidth = 2;
+  1026→        ctx.save();
+  1027→        ctx.shadowColor = 'rgba(56,189,248,0.5)';
+  1028→        ctx.shadowBlur = 9;
+  1029→        ctx.stroke();
+  1030→        ctx.restore();
+  1031→      }
+  1032→    };
+  1033→
+  1034→    const drawDrone = (g: Game, d: Drone) => {
+  1035→      const col = DRONE_COLORS[d.tier - 1];
+  1036→      const spawning = d.state === 'spawn';
+  1037→      const prog = spawning ? clamp(1 - d.spawnT / 900, 0, 1) : 1;
+  1038→      ctx.save();
+  1039→      ctx.translate(d.x, d.y);
+  1040→      ctx.globalAlpha = spawning ? prog * 0.9 : 1;
+  1041→      const sc = 0.4 + 0.6 * prog;
+  1042→      ctx.scale(sc, sc);
+  1043→      if (spawning) {
+  1044→        ctx.strokeStyle = col;
+  1045→        ctx.globalAlpha = (1 - prog) * 0.8;
+  1046→        ctx.lineWidth = 2;
+  1047→        ctx.beginPath();
+  1048→        ctx.arc(0, 0, DRONE_R + 26 * (1 - prog) + 6, 0, Math.PI * 2);
+  1049→        ctx.stroke();
+  1050→        ctx.globalAlpha = prog * 0.9;
+  1051→      }
+  1052→      /* rotor ring */
+  1053→      ctx.save();
+  1054→      ctx.rotate(d.spin);
+  1055→      ctx.strokeStyle = col;
+  1056→      ctx.globalAlpha *= 0.65;
+  1057→      ctx.lineWidth = 2;
+  1058→      ctx.setLineDash([5, 7]);
+  1059→      ctx.beginPath();
+  1060→      ctx.arc(0, 0, DRONE_R + 6, 0, Math.PI * 2);
+  1061→      ctx.stroke();
+  1062→      ctx.setLineDash([]);
+  1063→      ctx.restore();
+  1064→      /* hexagonal hull */
+  1065→      ctx.save();
+  1066→      ctx.rotate(d.bodyAng);
+  1067→      ctx.beginPath();
+  1068→      for (let i = 0; i < 6; i++) {
+  1069→        const a = (Math.PI / 3) * i;
+  1070→        const px2 = Math.cos(a) * DRONE_R;
+  1071→        const py2 = Math.sin(a) * DRONE_R;
+  1072→        if (i === 0) ctx.moveTo(px2, py2);
+  1073→        else ctx.lineTo(px2, py2);
+  1074→      }
+  1075→      ctx.closePath();
+  1076→      ctx.fillStyle = 'rgba(2,6,23,0.92)';
+  1077→      ctx.save();
+  1078→      ctx.shadowColor = col;
+  1079→      ctx.shadowBlur = 10;
+  1080→      ctx.fill();
+  1081→      ctx.restore();
+  1082→      ctx.strokeStyle = col;
+  1083→      ctx.lineWidth = 2;
+  1084→      ctx.stroke();
+  1085→      ctx.restore();
+  1086→      /* core eye + barrel track the gun angle */
+  1087→      ctx.rotate(d.gunAng);
+  1088→      ctx.strokeStyle = col;
+  1089→      ctx.lineWidth = 3;
+  1090→      ctx.beginPath();
+  1091→      ctx.moveTo(DRONE_R * 0.4, 0);
+  1092→      ctx.lineTo(DRONE_R + 7, 0);
+  1093→      ctx.stroke();
+  1094→      ctx.fillStyle = col;
+  1095→      ctx.beginPath();
+  1096→      ctx.arc(DRONE_R * 0.35, 0, 3.4, 0, Math.PI * 2);
+  1097→      ctx.fill();
+  1098→      /* aim telegraph */
+  1099→      if (d.state === 'aim') {
+  1100→        const prog2 = 1 - d.aimT / droneSpec(d.tier).aimMs;
+  1101→        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  1102→        ctx.beginPath();
+  1103→        ctx.arc(DRONE_R + 9, 0, 1.5 + prog2 * 3.5, 0, Math.PI * 2);
+  1104→        ctx.fill();
+  1105→      }
+  1106→      /* hit flash */
+  1107→      if (d.flashT > 0) {
+  1108→        ctx.globalAlpha = (d.flashT / 130) * 0.85;
+  1109→        ctx.fillStyle = '#ffffff';
+  1110→        ctx.beginPath();
+  1111→        ctx.arc(0, 0, DRONE_R, 0, Math.PI * 2);
+  1112→        ctx.fill();
+  1113→      }
+  1114→      ctx.restore();
+  1115→      /* hp pips */
+  1116→      if (!spawning && d.maxHp > 1) {
+  1117→        for (let i = 0; i < d.maxHp; i++) {
+  1118→          ctx.fillStyle = i < d.hp ? col : 'rgba(255,255,255,0.16)';
+  1119→          ctx.beginPath();
+  1120→          ctx.arc(d.x - (d.maxHp - 1) * 3.4 + i * 6.8, d.y - DRONE_R - 9, 2, 0, Math.PI * 2);
+  1121→          ctx.fill();
+  1122→        }
+  1123→      }
+  1124→    };
+  1125→
+  1126→    const drawPlayer = (g: Game) => {
+  1127→      const blink = g.invT > 0 && Math.floor(g.time / 90) % 2 === 0;
+  1128→      ctx.save();
+  1129→      ctx.translate(g.px, g.py);
+  1130→      ctx.globalAlpha = blink ? 0.35 : 1;
+  1131→      /* treads */
+  1132→      ctx.save();
+  1133→      ctx.rotate(g.hullAng);
+  1134→      ctx.fillStyle = 'rgba(51,65,85,0.95)';
+  1135→      ctx.strokeStyle = 'rgba(148,163,184,0.5)';
+  1136→      ctx.lineWidth = 1;
+  1137→      rr(ctx, -13, -12, 26, 6, 3);
+  1138→      ctx.fill(); ctx.stroke();
+  1139→      rr(ctx, -13, 6, 26, 6, 3);
+  1140→      ctx.fill(); ctx.stroke();
+  1141→      /* hull */
+  1142→      rr(ctx, -12, -8.5, 24, 17, 5);
+  1143→      ctx.save();
+  1144→      ctx.shadowColor = 'rgba(251,191,36,0.8)';
+  1145→      ctx.shadowBlur = 12;
+  1146→      const hullG = ctx.createLinearGradient(-12, -8, 12, 9);
+  1147→      hullG.addColorStop(0, '#78350f');
+  1148→      hullG.addColorStop(0.55, '#b45309');
+  1149→      hullG.addColorStop(1, '#f59e0b');
+  1150→      ctx.fillStyle = hullG;
+  1151→      ctx.fill();
+  1152→      ctx.restore();
+  1153→      ctx.strokeStyle = '#fcd34d';
+  1154→      ctx.lineWidth = 1.4;
+  1155→      ctx.stroke();
+  1156→      ctx.restore();
+  1157→      /* turret */
+  1158→      ctx.save();
+  1159→      ctx.rotate(g.gunAng);
+  1160→      ctx.fillStyle = '#fde68a';
+  1161→      ctx.save();
+  1162→      ctx.shadowColor = 'rgba(253,230,138,0.9)';
+  1163→      ctx.shadowBlur = 8;
+  1164→      rr(ctx, 2, -2.6, PLAYER_R + 9, 5.2, 2.5);
+  1165→      ctx.fill();
+  1166→      ctx.restore();
+  1167→      ctx.beginPath();
+  1168→      ctx.arc(0, 0, 7.2, 0, Math.PI * 2);
+  1169→      ctx.fillStyle = '#f59e0b';
+  1170→      ctx.fill();
+  1171→      ctx.strokeStyle = '#fde68a';
+  1172→      ctx.lineWidth = 1.6;
+  1173→      ctx.stroke();
+  1174→      ctx.restore();
+  1175→      /* shield bubble */
+  1176→      if (g.shield > 0) {
+  1177→        ctx.strokeStyle = `rgba(56,189,248,${0.55 + 0.3 * Math.sin(g.time / 140)})`;
+  1178→        ctx.lineWidth = 2.2;
+  1179→        ctx.beginPath();
+  1180→        ctx.arc(0, 0, PLAYER_R + 9, 0, Math.PI * 2);
+  1181→        ctx.stroke();
+  1182→      }
+  1183→      ctx.restore();
+  1184→      /* mouse/touch aim reticle */
+  1185→      if ((g.aimMode === 'mouse' || g.aimMode === 'manual') && g.phase === 'playing') {
+  1186→        ctx.save();
+  1187→        ctx.translate(g.aim.x, g.aim.y);
+  1188→        ctx.strokeStyle = 'rgba(253,230,138,0.4)';
+  1189→        ctx.lineWidth = 1.4;
+  1190→        ctx.beginPath();
+  1191→        ctx.arc(0, 0, 9, 0, Math.PI * 2);
+  1192→        ctx.moveTo(-13, 0); ctx.lineTo(-5, 0);
+  1193→        ctx.moveTo(5, 0); ctx.lineTo(13, 0);
+  1194→        ctx.moveTo(0, -13); ctx.lineTo(0, -5);
+  1195→        ctx.moveTo(0, 5); ctx.lineTo(0, 13);
+  1196→        ctx.stroke();
+  1197→        ctx.restore();
+  1198→      }
+  1199→    };
+  1200→
+  1201→    const drawEntities = (g: Game) => {
+  1202→      /* pickups: rotating insight cells */
+  1203→      for (const p of g.pickups) {
+  1204→        const col = p.kind === 'shield' ? '#38bdf8' : p.kind === 'rapid' ? '#fbbf24' : '#34d399';
+  1205→        const fade = p.life < 3000 && Math.floor(p.life / 240) % 2 === 0 ? 0.35 : 1;
+  1206→        ctx.save();
+  1207→        ctx.translate(p.x, p.y + Math.sin(p.t / 320) * 3);
+  1208→        ctx.rotate(p.t / 700);
+  1209→        ctx.globalAlpha = fade;
+  1210→        ctx.beginPath();
+  1211→        for (let i = 0; i < 6; i++) {
+  1212→          const a = (Math.PI / 3) * i;
+  1213→          const px2 = Math.cos(a) * 10;
+  1214→          const py2 = Math.sin(a) * 10;
+  1215→          if (i === 0) ctx.moveTo(px2, py2);
+  1216→          else ctx.lineTo(px2, py2);
+  1217→        }
+  1218→        ctx.closePath();
+  1219→        ctx.fillStyle = 'rgba(2,6,23,0.9)';
+  1220→        ctx.fill();
+  1221→        ctx.strokeStyle = col;
+  1222→        ctx.lineWidth = 2;
+  1223→        ctx.save();
+  1224→        ctx.shadowColor = col;
+  1225→        ctx.shadowBlur = 10;
+  1226→        ctx.stroke();
+  1227→        ctx.restore();
+  1228→        ctx.rotate(-p.t / 700);
+  1229→        ctx.fillStyle = col;
+  1230→        if (p.kind === 'shield') { ctx.fillRect(-4.5, -4.5, 9, 9); ctx.fillStyle = '#060a14'; ctx.fillRect(-2, -2, 4, 4); }
+  1231→        else if (p.kind === 'rapid') { ctx.fillRect(-1.6, -6, 3.2, 12); ctx.fillRect(-6, -1.6, 12, 3.2); }
+  1232→        else { ctx.fillRect(-1.6, -6, 3.2, 12); ctx.fillRect(-6, -1.6, 12, 3.2); ctx.fillRect(-1.6, -1.6, 3.2, 3.2); }
+  1233→        ctx.restore();
+  1234→      }
+  1235→      /* pulses & plasma */
+  1236→      ctx.save();
+  1237→      ctx.globalCompositeOperation = 'lighter';
+  1238→      for (const p of g.pulses) {
+  1239→        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 2.6);
+  1240→        grad.addColorStop(0, p.friendly ? 'rgba(254,243,199,0.95)' : 'rgba(255,255,255,0.9)');
+  1241→        grad.addColorStop(0.4, p.friendly ? 'rgba(251,191,36,0.55)' : `${p.color}88`);
+  1242→        grad.addColorStop(1, 'rgba(0,0,0,0)');
+  1243→        ctx.fillStyle = grad;
+  1244→        ctx.beginPath();
+  1245→        ctx.arc(p.x, p.y, p.r * 2.6, 0, Math.PI * 2);
+  1246→        ctx.fill();
+  1247→        ctx.fillStyle = p.friendly ? '#fef3c7' : p.color;
+  1248→        ctx.beginPath();
+  1249→        ctx.arc(p.x, p.y, p.r * 0.55, 0, Math.PI * 2);
+  1250→        ctx.fill();
+  1251→        /* motion trail */
+  1252→        ctx.strokeStyle = p.friendly ? 'rgba(251,191,36,0.35)' : `${p.color}55`;
+  1253→        ctx.lineWidth = 2.4;
+  1254→        ctx.beginPath();
+  1255→        ctx.moveTo(p.x, p.y);
+  1256→        ctx.lineTo(p.x - p.vx * 2.4, p.y - p.vy * 2.4);
+  1257→        ctx.stroke();
+  1258→      }
+  1259→      /* particles */
+  1260→      for (const p of g.parts) {
+  1261→        ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+  1262→        ctx.fillStyle = p.c;
+  1263→        ctx.beginPath();
+  1264→        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+  1265→        ctx.fill();
+  1266→      }
+  1267→      ctx.restore();
+  1268→      /* score popups */
+  1269→      ctx.textAlign = 'center';
+  1270→      ctx.textBaseline = 'middle';
+  1271→      for (const p of g.pops) {
+  1272→        ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+  1273→        ctx.font = '900 17px ui-sans-serif, system-ui, sans-serif';
+  1274→        ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+  1275→        ctx.lineWidth = 3.5;
+  1276→        ctx.strokeText(p.txt, p.x, p.y);
+  1277→        ctx.fillStyle = p.c;
+  1278→        ctx.fillText(p.txt, p.x, p.y);
+  1279→      }
+  1280→      ctx.globalAlpha = 1;
+  1281→    };
+  1282→
+  1283→    const drawStick = (g: Game) => {
+  1284→      if (!g.stick.active) return;
+  1285→      ctx.save();
+  1286→      ctx.globalAlpha = 0.55;
+  1287→      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  1288→      ctx.lineWidth = 2;
+  1289→      ctx.beginPath();
+  1290→      ctx.arc(g.stick.ox, g.stick.oy, 36, 0, Math.PI * 2);
+  1291→      ctx.stroke();
+  1292→      ctx.fillStyle = 'rgba(251,191,36,0.4)';
+  1293→      ctx.beginPath();
+  1294→      ctx.arc(g.stick.ox + g.stick.dx * 30, g.stick.oy + g.stick.dy * 30, 16, 0, Math.PI * 2);
+  1295→      ctx.fill();
+  1296→      ctx.restore();
+  1297→    };
+  1298→
+  1299→    const draw = () => {
+  1300→      const g = gRef.current;
+  1301→      if (!g || g.phase === 'intro') return;
+  1302→      const scale = canvas.width / ARENA_W;
+  1303→      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  1304→      if (g.shake > 0) ctx.translate((Math.random() - 0.5) * g.shake * 11, (Math.random() - 0.5) * g.shake * 11);
+  1305→      drawGrid(g);
+  1306→      drawEntities(g);
+  1307→      for (const d of g.drones) drawDrone(g, d);
+  1308→      drawPlayer(g);
+  1309→      drawStick(g);
+  1310→    };
+  1311→
+  1312→    /* ------------------------------ loop ------------------------------ */
+  1313→    let raf = 0;
+  1314→    let prev = performance.now();
+  1315→    const loop = (now: number) => {
+  1316→      raf = requestAnimationFrame(loop);
+  1317→      const dt = clamp(now - prev, 0, 34);
+  1318→      prev = now;
+  1319→      update(dt, dt / (1000 / 60));
+  1320→      draw();
+  1321→    };
+  1322→    raf = requestAnimationFrame(loop);
+  1323→
+  1324→    /* --------------------------- keyboard ----------------------------- */
+  1325→    const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+  1326→    const onKeyDown = (e: KeyboardEvent) => {
+  1327→      const target = e.target as HTMLElement | null;
+  1328→      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+  1329→      const k = e.key.toLowerCase();
+  1330→      if (k === 'escape') { e.preventDefault(); togglePause(); return; }
+  1331→      if (k === ' ') { e.preventDefault(); fireKeyRef.current = true; return; }
+  1332→      if (MOVE_KEYS.includes(k)) { e.preventDefault(); gRef.current?.keys.add(k); }
+  1333→    };
+  1334→    const onKeyUp = (e: KeyboardEvent) => {
+  1335→      const k = e.key.toLowerCase();
+  1336→      if (k === ' ') fireKeyRef.current = false;
+  1337→      else if (MOVE_KEYS.includes(k)) gRef.current?.keys.delete(k);
+  1338→    };
+  1339→    const onWinPointerUp = (e: PointerEvent) => {
+  1340→      if (e.pointerType === 'mouse') fireMouseRef.current = false;
+  1341→    };
+  1342→    const onVisibility = () => {
+  1343→      const g = gRef.current;
+  1344→      if (document.hidden && g && g.phase === 'playing') { g.phase = 'paused'; setPhase('paused'); }
+  1345→    };
+  1346→    window.addEventListener('keydown', onKeyDown);
+  1347→    window.addEventListener('keyup', onKeyUp);
+  1348→    window.addEventListener('pointerup', onWinPointerUp);
+  1349→    document.addEventListener('visibilitychange', onVisibility);
+  1350→
+  1351→    return () => {
+  1352→      cancelAnimationFrame(raf);
+  1353→      ro.disconnect();
+  1354→      window.removeEventListener('keydown', onKeyDown);
+  1355→      window.removeEventListener('keyup', onKeyUp);
+  1356→      window.removeEventListener('pointerup', onWinPointerUp);
+  1357→      document.removeEventListener('visibilitychange', onVisibility);
+  1358→      for (const id of timersRef.current) window.clearTimeout(id);
+  1359→      timersRef.current = [];
+  1360→    };
+  1361→  }, []);
+  1362→
+  1363→  /* --------------------- arena pointer input (both schemes) --------------------- */
+  1364→  const toArena = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  1365→    const el = e.currentTarget;
+  1366→    const r = el.getBoundingClientRect();
+  1367→    return {
+  1368→      x: (e.clientX - r.left) * (ARENA_W / Math.max(1, r.width)),
+  1369→      y: (e.clientY - r.top) * (ARENA_H / Math.max(1, r.height)),
+  1370→    };
+  1371→  };
+  1372→
+  1373→  const onCanvasPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  1374→    const g = gRef.current;
+  1375→    if (!g || (g.phase !== 'playing')) return;
+  1376→    const p = toArena(e);
+  1377→    if (e.pointerType === 'mouse') {
+  1378→      if (e.button !== 0) return;
+  1379→      g.aimMode = 'mouse';
+  1380→      g.aim = { x: p.x, y: p.y };
+  1381→      fireMouseRef.current = true;
+  1382→    } else if (p.x < ARENA_W / 2) {
+  1383→      g.stick = { active: true, id: e.pointerId, ox: p.x, oy: p.y, dx: 0, dy: 0 };
+  1384→    } else {
+  1385→      g.aimMode = 'manual';
+  1386→      g.aim = { x: p.x, y: p.y };
+  1387→      fireTouchRef.current = true;
+  1388→      fireTouchId.current = e.pointerId;
+  1389→    }
+  1390→  };
+  1391→
+  1392→  const onCanvasPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  1393→    const g = gRef.current;
+  1394→    if (!g) return;
+  1395→    const p = toArena(e);
+  1396→    if (e.pointerType === 'mouse') {
+  1397→      g.aimMode = 'mouse';
+  1398→      g.aim = { x: p.x, y: p.y };
+  1399→    } else if (g.stick.active && g.stick.id === e.pointerId) {
+  1400→      let dx = (p.x - g.stick.ox) / 44;
+  1401→      let dy = (p.y - g.stick.oy) / 44;
+  1402→      const m = Math.hypot(dx, dy);
+  1403→      if (m > 1) { dx /= m; dy /= m; }
+  1404→      g.stick.dx = dx;
+  1405→      g.stick.dy = dy;
+  1406→    } else if (fireTouchRef.current && fireTouchId.current === e.pointerId) {
+  1407→      g.aim = { x: p.x, y: p.y };
+  1408→    }
+  1409→  };
+  1410→
+  1411→  const onCanvasPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+  1412→    const g = gRef.current;
+  1413→    if (!g) return;
+  1414→    if (e.pointerType === 'mouse') {
+  1415→      fireMouseRef.current = false;
+  1416→    } else if (g.stick.active && g.stick.id === e.pointerId) {
+  1417→      g.stick = { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 };
+  1418→    } else if (fireTouchId.current === e.pointerId) {
+  1419→      fireTouchRef.current = false;
+  1420→      fireTouchId.current = -1;
+  1421→    }
+  1422→  };
+  1423→
+  1424→  const onFireBtnDown = (e: ReactPointerEvent<HTMLButtonElement>) => {
+  1425→    e.preventDefault();
+  1426→    const g = gRef.current;
+  1427→    if (!g || g.phase !== 'playing') return;
+  1428→    g.aimMode = 'auto';
+  1429→    fireBtnRef.current = true;
+  1430→  };
+  1431→  const onFireBtnUp = () => { fireBtnRef.current = false; };
+  1432→
+  1433→  /* ------------------------------ derived HUD ------------------------------ */
+  1434→  const dNum = (n: number) => localizeDigits(n, locale);
+  1435→  const remaining = 10 - robotsDown;
+  1436→  const inGame = phase !== 'intro';
+  1437→
+  1438→  return (
+  1439→    <div dir={rtl ? 'rtl' : 'ltr'} className="mx-auto w-full max-w-3xl px-2 pb-8 pt-2 sm:px-3">
+  1440→      <style>{MT_CSS}</style>
+  1441→
+  1442→      <div className="mt-shell relative overflow-hidden rounded-3xl border border-amber-500/25 p-3 shadow-2xl shadow-black/50 sm:p-4">
+  1443→        {/* ---------------- HUD ---------------- */}
+  1444→        <div className="relative z-10 mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+  1445→          <h2 className="flex items-center gap-1.5 text-sm font-black text-amber-100 sm:text-base">
+  1446→            <Crosshair className="h-4 w-4 shrink-0 text-amber-400" />
+  1447→            {t('game_mazemind')}
+  1448→          </h2>
+  1449→          {inGame && (
+  1450→            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-200">
+  1451→              {t('mazemind_wave')} {dNum(wave)}/{dNum(WAVES.length)}
+  1452→            </span>
+  1453→          )}
+  1454→          {inGame && (
+  1455→            <span className="inline-flex items-center gap-1 rounded-full border border-rose-500/25 bg-rose-500/10 px-2 py-0.5 text-[11px] font-bold text-rose-300" title={t('mazemind_robots_left')}>
+  1456→              🤖 {dNum(robotsDown)}/{dNum(10)} · {dNum(remaining)} {t('mazemind_robots_left')}
+  1457→            </span>
+  1458→          )}
+  1459→          {inGame && (
+  1460→            <span className="flex items-center gap-0.5" aria-label={t('mazemind_lives')} title={t('mazemind_lives')}>
+  1461→              {Array.from({ length: Math.max(3, hearts) }, (_, i) => (
+  1462→                <Heart key={i} className={`h-4 w-4 ${i < hearts ? 'text-rose-400' : 'text-white/15'}`} fill="currentColor" />
+  1463→              ))}
+  1464→            </span>
+  1465→          )}
+  1466→          {inGame && pow.s > 0 && (
+  1467→            <span className="mt-pulse inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] font-bold text-sky-300">
+  1468→              <Shield className="h-3 w-3" /> {dNum(pow.s)}
+  1469→            </span>
+  1470→          )}
+  1471→          {inGame && pow.r > 0 && (
+  1472→            <span className="mt-pulse inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-300">
+  1473→              <Zap className="h-3 w-3" /> {dNum(pow.r)}
+  1474→            </span>
+  1475→          )}
+  1476→          <span className="ms-auto flex items-center gap-2">
+  1477→            {inGame && phase !== 'over' && (
+  1478→              <Button
+  1479→                variant="ghost" size="icon"
+  1480→                className="h-8 w-8 text-amber-200 hover:bg-white/10 hover:text-amber-100"
+  1481→                aria-label={t('mazemind_paused')} title={t('mazemind_paused')}
+  1482→                onClick={togglePause}
+  1483→              >
+  1484→                <Pause className="h-4 w-4" />
+  1485→              </Button>
+  1486→            )}
+  1487→            <span className="text-end">
+  1488→              <span className="block text-[9px] uppercase tracking-wide text-amber-200/60">{t('mazemind_score')}</span>
+  1489→              <span className="gold-text block text-xl font-black leading-none sm:text-2xl">{dNum(score)}</span>
+  1490→            </span>
+  1491→            <span className="hidden items-center gap-1 text-[11px] font-bold text-amber-200/70 sm:flex" title={t('mazemind_best')}>
+  1492→              <Trophy className="h-3.5 w-3.5 text-amber-400" /> {dNum(best)}
+  1493→            </span>
+  1494→          </span>
+  1495→        </div>
+  1496→
+  1497→        {/* ---------------- arena ---------------- */}
+  1498→        <div
+  1499→          className="relative mx-auto w-full max-w-[640px] touch-none select-none"
+  1500→          style={{ aspectRatio: `${ARENA_W} / ${ARENA_H}` }}
+  1501→          role="application"
+  1502→          aria-label={`${t('game_mazemind')} — ${t('game_mazemind_desc')}`}
+  1503→        >
+  1504→          <canvas
+  1505→            ref={canvasRef}
+  1506→            className="absolute inset-0 h-full w-full rounded-2xl"
+  1507→            style={{ touchAction: 'none' }}
+  1508→            onPointerDown={onCanvasPointerDown}
+  1509→            onPointerMove={onCanvasPointerMove}
+  1510→            onPointerUp={onCanvasPointerUp}
+  1511→            onPointerCancel={onCanvasPointerUp}
+  1512→            onContextMenu={(e) => e.preventDefault()}
+  1513→          />
+  1514→
+  1515→          {/* touch fire button (auto-aim) — visible during play, both schemes */}
+  1516→          {phase === 'playing' && (
+  1517→            <button
+  1518→              type="button"
+  1519→              aria-label={t('mazemind_fire')}
+  1520→              className="absolute bottom-3 end-3 z-20 grid h-16 w-16 touch-none select-none place-items-center rounded-full border-2 border-amber-400/70 bg-amber-500/15 text-amber-200 shadow-lg shadow-black/40 backdrop-blur-sm transition-colors active:bg-amber-500/40"
+  1521→              onPointerDown={onFireBtnDown}
+  1522→              onPointerUp={onFireBtnUp}
+  1523→              onPointerCancel={onFireBtnUp}
+  1524→              onPointerLeave={onFireBtnUp}
+  1525→              onContextMenu={(e) => e.preventDefault()}
+  1526→            >
+  1527→              <Zap className="h-7 w-7" fill="currentColor" />
+  1528→            </button>
+  1529→          )}
+  1530→
+  1531→          {/* wave / victory banner */}
+  1532→          {banner && phase === 'banner' && (
+  1533→            <div key={banner.key} className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
+  1534→              <div className="mt-banner text-center">
+  1535→                <div className="gold-text text-4xl font-black drop-shadow-[0_0_18px_rgba(251,191,36,0.55)] sm:text-5xl">{banner.text}</div>
+  1536→                {banner.sub && <div className="mt-1 text-sm font-bold text-amber-200/80">{banner.sub}</div>}
+  1537→              </div>
+  1538→            </div>
+  1539→          )}
+  1540→
+  1541→          {/* pause overlay */}
+  1542→          {phase === 'paused' && (
+  1543→            <div className="absolute inset-0 z-30 grid place-items-center rounded-2xl bg-black/70 backdrop-blur-sm">
+  1544→              <div className="animate-pop w-full max-w-[260px] space-y-3 rounded-2xl border border-amber-500/25 bg-[#0a0f1e]/95 p-5 text-center">
+  1545→                <Pause className="mx-auto h-8 w-8 text-amber-400" />
+  1546→                <p className="text-lg font-black text-amber-100">{t('mazemind_paused')}</p>
+  1547→                <div className="flex gap-2">
+  1548→                  <Button className="glow-gold flex-1" onClick={togglePause}>
+  1549→                    <Play className="me-1 h-4 w-4" /> {t('mazemind_resume')}
+  1550→                  </Button>
+  1551→                  <Button variant="outline" className="flex-1" onClick={() => { sfx.click(); onExit(); }}>
+  1552→                    {t('mazemind_quit')}
+  1553→                  </Button>
+  1554→                </div>
+  1555→              </div>
+  1556→            </div>
+  1557→          )}
+  1558→
+  1559→          {/* intro / briefing */}
+  1560→          {phase === 'intro' && (
+  1561→            <div className="absolute inset-0 z-30 grid place-items-center overflow-y-auto rounded-2xl bg-[#060a14]/92 p-3 backdrop-blur-sm">
+  1562→              <div className="animate-pop w-full max-w-[430px] space-y-3 text-center">
+  1563→                <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-amber-500/30 bg-amber-500/10">
+  1564→                  <Crosshair className="h-7 w-7 text-amber-400" />
+  1565→                </div>
+  1566→                <div>
+  1567→                  <h3 className="gold-text text-2xl font-black">{t('game_mazemind')}</h3>
+  1568→                  <p className="text-xs text-muted-foreground">{t('game_mazemind_tag')}</p>
+  1569→                </div>
+  1570→                <div className="space-y-2 text-start">
+  1571→                  {[
+  1572→                    { icon: <Move className="h-4 w-4 text-sky-400" />, txt: t('mazemind_how1') },
+  1573→                    { icon: <Crosshair className="h-4 w-4 text-amber-400" />, txt: t('mazemind_how2') },
+  1574→                    { icon: <Brain className="h-4 w-4 text-fuchsia-400" />, txt: t('mazemind_how3') },
+  1575→                  ].map((row, i) => (
+  1576→                    <div key={i} className="flex items-start gap-2.5 rounded-xl border border-white/10 bg-white/[0.04] p-2.5">
+  1577→                      <span className="mt-0.5 shrink-0">{row.icon}</span>
+  1578→                      <p className="text-[11.5px] leading-relaxed text-foreground/90">{row.txt}</p>
+  1579→                    </div>
+  1580→                  ))}
+  1581→                </div>
+  1582→                <p className="text-[10.5px] leading-relaxed text-muted-foreground">
+  1583→                  <span className="hidden sm:inline">{t('mazemind_keys_hint')}</span>
+  1584→                  <span className="sm:hidden">{t('mazemind_touch_hint')}</span>
+  1585→                </p>
+  1586→                <div className="flex items-center justify-center gap-1.5 text-[11px] font-bold text-amber-200/80">
+  1587→                  <Trophy className="h-3.5 w-3.5 text-amber-400" /> {t('mazemind_best')}: {dNum(best)}
+  1588→                </div>
+  1589→                <div className="flex gap-2 pt-1">
+  1590→                  <Button className="glow-gold flex-1" onClick={() => { sfx.click(); startRun(); }}>
+  1591→                    <Play className="me-1 h-4 w-4" /> {t('mazemind_start')}
+  1592→                  </Button>
+  1593→                  <Button variant="outline" onClick={() => { sfx.click(); onExit(); }}>
+  1594→                    <X className="me-1 h-4 w-4" /> {t('back_park')}
+  1595→                  </Button>
+  1596→                </div>
+  1597→              </div>
+  1598→            </div>
+  1599→          )}
+  1600→        </div>
+  1601→
+  1602→        {/* control hint footer */}
+  1603→        <p className="mt-2 text-center text-[10px] text-muted-foreground">
+  1604→          <span className="hidden sm:inline">{t('mazemind_keys_hint')}</span>
+  1605→          <span className="sm:hidden">{t('mazemind_touch_hint')}</span>
+  1606→        </p>
+  1607→      </div>
+  1608→
+  1609→      {/* shared rewards modal (guests still see score; rewards stay empty) */}
+  1610→      <ArcadeResultModal
+  1611→        open={resultOpen}
+  1612→        title={t('arcade_done')}
+  1613→        subtitle={`🤖 ${dNum(summary.robotsDown)}/${dNum(10)} · ${t('mazemind_wave')} ${dNum(summary.wave)} · ${dNum(summary.acc)}%`}
+  1614→        score={lastScore}
+  1615→        rewards={rewards}
+  1616→        emoji="🛡️"
+  1617→        onAgain={() => { startRun(); }}
+  1618→        onExit={onExit}
+  1619→      />
+  1620→    </div>
+  1621→  );
+  1622→}
+  1623→

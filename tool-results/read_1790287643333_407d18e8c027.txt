@@ -1,0 +1,702 @@
+     1→'use client';
+     2→
+     3→/**
+     4→ * TinkTankGame — "TINKTANK" (تینک‌تانک) — task A1 rework of Mind Tank.
+     5→ *
+     6→ * A full tank-progression campaign: 40 levels × 4–19 procedural missions
+     7→ * (CLEAR / SURVIVE / SIEGE + a BOSS every 4th level), an 8-tank garage with
+     8→ * five upgrade tracks each, an in-game credit economy persisted in
+     9→ * localStorage (`doi_tinktank_v1`), and a neon canvas battlefield with a
+    10→ * smooth camera, glow trails, particles and telegraphed enemy patterns.
+    11→ *
+    12→ * Platform integration:
+    13→ *  - shared arcade economy via submitArcade('mazemind', …) — the internal id
+    14→ *    stays 'mazemind' so leaderboard/economy history is continuous;
+    15→ *  - RetroBoot super-retro opening before the main menu;
+    16→ *  - useGameSession(true) hides platform chrome / fullscreen on touch;
+    17→ *  - perfMode halves particles, disables shake and caps DPR at 1.
+    18→ *
+    19→ * Controls — desktop: WASD/arrows move, mouse aim, click/Space fire,
+    20→ * Shift special, Esc pause. Touch: left floating stick (move), right drag
+    21→ * (aim), dedicated FIRE + SPECIAL buttons (multi-touch, pointer events).
+    22→ */
+    23→
+    24→import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+    25→import { toast } from 'sonner';
+    26→import { useApp } from '@/store/app';
+    27→import { localizeDigits } from '@/lib/i18n';
+    28→import { sfx } from '@/lib/sound';
+    29→import { useGameSession, isTouchDevice } from '@/lib/immersive';
+    30→import { submitArcade, announceArcadeRewards, ArcadeResultModal, type ArcadeSubmitResult } from '@/lib/arcade-client';
+    31→import { Button } from '@/components/ui/button';
+    32→import { RetroBoot } from '@/components/shared/RetroBoot';
+    33→import {
+    34→  Crosshair, Heart, Lock, Pause, Play, Rocket, Shield, Star, Swords, Timer, Trophy, Wrench, X, Zap,
+    35→} from 'lucide-react';
+    36→import {
+    37→  WORLD_W, WORLD_H, PAD, THEMES,
+    38→  TANKS, TANK_BY_ID, TT_STATS as TANK_STATS,
+    39→  effStat, upgradeCost, tankName, tankBlurb, defaultSave,
+    40→  buildMission, buildArena, missionsInLevel,
+    41→  loadTTSave, saveTTSave, addDriverXp, driverNeed, missionReward,
+    42→  isLevelUnlocked, isMissionUnlocked, totalStars, mulberry32, clamp,
+    43→  type TankSpec, type TTStat, type TTSave, type MissionDef, type TTWall, type TTArena,
+    44→} from '@/lib/game/tinktank-data';
+    45→
+    46→/* ============================== tuning ================================= */
+    47→/* Speeds are "frame units" at the 60 fps reference step (step = dt/16.67). */
+    48→
+    49→const VIEW_W = 900;          // logical camera viewport (world units)
+    50→const VIEW_H = 540;
+    51→const PLAYER_R = 14;
+    52→const BULLET_R = 5.4;
+    53→const PLASMA_R = 5.8;
+    54→const DRONE_R = 15;
+    55→const BOSS_R = 46;
+    56→const GEN_HALF = 40;         // generator half-size
+    57→const INV_MS = 950;          // post-hit invulnerability
+    58→const PICKUP_LIFE = 11_000;
+    59→const DROP_CHANCE = 0.3;
+    60→const HEAT_PER_SHOT = 7;
+    61→const HEAT_COOL = 30;        // per second
+    62→const HEAT_COOL_IDLE = 46;   // per second when not firing
+    63→const HEAT_MAX = 100;
+    64→const HEAT_UNLOCK = 45;
+    65→const MAX_PARTS = 320;
+    66→const MAX_TRAIL = 9;
+    67→
+    68→const SCORE_KILL_BASE = 40;
+    69→const SCORE_BOSS = 800;
+    70→const SCORE_WAVE = 60;
+    71→const SCORE_WIN = 250;
+    72→const SCORE_PERFECT = 150;
+    73→
+    74→/* ============================== types ================================== */
+    75→
+    76→type Phase = 'banner' | 'playing' | 'paused' | 'won' | 'lost';
+    77→type Screen = 'boot' | 'menu' | 'levels' | 'level' | 'brief' | 'game' | 'garage' | 'howto' | 'stats';
+    78→type DroneKind = 'scout' | 'gunner' | 'sniper' | 'boss';
+    79→
+    80→interface Drone {
+    81→  id: number; kind: DroneKind;
+    82→  x: number; y: number; vx: number; vy: number;
+    83→  hp: number; maxHp: number;
+    84→  state: 'spawn' | 'patrol' | 'chase' | 'aim';
+    85→  spawnT: number; fireT: number; aimT: number; losLost: number; stuckT: number;
+    86→  bodyAng: number; gunAng: number; wp: { x: number; y: number };
+    87→  orbitDir: number; dodgeT: number; dodgeAng: number; flashT: number; spin: number;
+    88→  /* boss only */
+    89→  phase?: number; burstT?: number; burstN?: number; ringT?: number; spiralAng?: number; minionT?: number;
+    90→  stunT?: number;
+    91→}
+    92→interface Bullet {
+    93→  x: number; y: number; vx: number; vy: number; r: number;
+    94→  life: number; friendly: boolean; color: string;
+    95→  splash?: number; pierce?: boolean; hits?: number[]; molten?: boolean;
+    96→}
+    97→interface Generator {
+    98→  x: number; y: number; hp: number; maxHp: number; pulseT: number; spin: number; flashT: number;
+    99→}
+   100→interface Pickup { id: number; x: number; y: number; kind: 'shield' | 'repair' | 'energy'; t: number; life: number }
+   101→interface Part { x: number; y: number; vx: number; vy: number; life: number; max: number; c: string; r: number }
+   102→interface Pop { x: number; y: number; txt: string; c: string; life: number; max: number }
+   103→interface Beam { x1: number; y1: number; x2: number; y2: number; life: number; c: string }
+   104→
+   105→interface TankParams {
+   106→  damage: number; fireCd: number; speed: number; maxHp: number; energyRate: number;
+   107→  chain: boolean; splash: boolean; pierce: boolean; blink: boolean; regen: boolean;
+   108→  special: TankSpec['special'];
+   109→}
+   110→
+   111→interface RunResult {
+   112→  won: boolean;
+   113→  score: number;
+   114→  stars: number;
+   115→  timeMs: number;
+   116→  hits: number;
+   117→  acc: number;
+   118→  kills: number;
+   119→  bossKill: boolean;
+   120→}
+   121→
+   122→interface Game {
+   123→  phase: Phase;
+   124→  mission: MissionDef;
+   125→  arena: TTArena;
+   126→  params: TankParams;
+   127→  color: string; glow: string;
+   128→  /* player */
+   129→  px: number; py: number; pvx: number; pvy: number;
+   130→  hullAng: number; gunAng: number;
+   131→  hp: number; fireT: number; invT: number; heat: number; overheated: boolean;
+   132→  energy: number; buffT: number; shieldHits: number; shieldT: number; regenT: number;
+   133→  muzzleT: number; hitsTaken: number; kills: number; bossKill: boolean;
+   134→  shots: number; hitCount: number;
+   135→  trail: { x: number; y: number }[];
+   136→  /* objective state */
+   137→  wave: number; waveQueue: number; spawnT: number; surviveT: number; halfShown: boolean; finalShown: boolean;
+   138→  gen: Generator | null; chainDown: number; chainNext: number;
+   139→  bossSpawned: boolean;
+   140→  /* fx + input */
+   141→  camX: number; camY: number; shake: number; hitFlash: number; time: number; bannerT: number;
+   142→  keys: Set<string>;
+   143→  aim: { x: number; y: number }; aimMode: 'mouse' | 'manual' | 'auto';
+   144→  stick: { active: boolean; id: number; ox: number; oy: number; dx: number; dy: number };
+   145→  drones: Drone[]; bullets: Bullet[]; pickups: Pickup[]; parts: Part[]; pops: Pop[]; beams: Beam[];
+   146→  startedAt: number; elapsed: number;
+   147→}
+   148→
+   149→interface HudMirror {
+   150→  hp: number; maxHp: number; heat: number; energy: number; score: number;
+   151→  wave: number; waves: number; left: number; timeLeft: number;
+   152→  bossFrac: number; genFrac: number; specialPct: number; overheated: boolean; shield: boolean;
+   153→}
+   154→
+   155→/* ============================ math helpers ============================= */
+   156→
+   157→function angLerp(a: number, b: number, k: number) {
+   158→  const d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+   159→  return a + d * k;
+   160→}
+   161→
+   162→function circleRect(px: number, py: number, r: number, w: TTWall) {
+   163→  const cx = clamp(px, w.x, w.x + w.w);
+   164→  const cy = clamp(py, w.y, w.y + w.h);
+   165→  const dx = px - cx;
+   166→  const dy = py - cy;
+   167→  const d2 = dx * dx + dy * dy;
+   168→  if (d2 >= r * r) return null;
+   169→  if (d2 > 1e-6) {
+   170→    const d = Math.sqrt(d2);
+   171→    return { nx: dx / d, ny: dy / d, pen: r - d };
+   172→  }
+   173→  const l = px - w.x;
+   174→  const rt = w.x + w.w - px;
+   175→  const t = py - w.y;
+   176→  const b = w.y + w.h - py;
+   177→  const m = Math.min(l, rt, t, b);
+   178→  if (m === l) return { nx: -1, ny: 0, pen: r + l };
+   179→  if (m === rt) return { nx: 1, ny: 0, pen: r + rt };
+   180→  if (m === t) return { nx: 0, ny: -1, pen: r + t };
+   181→  return { nx: 0, ny: 1, pen: r + b };
+   182→}
+   183→
+   184→function segHitsRect(x1: number, y1: number, x2: number, y2: number, w: TTWall) {
+   185→  let t0 = 0;
+   186→  let t1 = 1;
+   187→  const dx = x2 - x1;
+   188→  const dy = y2 - y1;
+   189→  const p = [-dx, dx, -dy, dy];
+   190→  const q = [x1 - w.x, w.x + w.w - x1, y1 - w.y, w.y + w.h - y1];
+   191→  for (let i = 0; i < 4; i++) {
+   192→    if (p[i] === 0) {
+   193→      if (q[i] < 0) return false;
+   194→      continue;
+   195→    }
+   196→    const r = q[i] / p[i];
+   197→    if (p[i] < 0) {
+   198→      if (r > t1) return false;
+   199→      if (r > t0) t0 = r;
+   200→    } else {
+   201→      if (r < t0) return false;
+   202→      if (r < t1) t1 = r;
+   203→    }
+   204→  }
+   205→  return true;
+   206→}
+   207→
+   208→function hasLOS(x1: number, y1: number, x2: number, y2: number, walls: TTWall[]) {
+   209→  for (const w of walls) if (segHitsRect(x1, y1, x2, y2, w)) return false;
+   210→  return true;
+   211→}
+   212→
+   213→function pointFree(x: number, y: number, r: number, walls: TTWall[]) {
+   214→  for (const w of walls) if (circleRect(x, y, r, w)) return false;
+   215→  return true;
+   216→}
+   217→
+   218→function resolveWalls(x: number, y: number, r: number, vx: number, vy: number, e: number, walls: TTWall[]) {
+   219→  for (const w of walls) {
+   220→    const c = circleRect(x, y, r, w);
+   221→    if (!c) continue;
+   222→    x += c.nx * c.pen;
+   223→    y += c.ny * c.pen;
+   224→    const vn = vx * c.nx + vy * c.ny;
+   225→    if (vn < 0) {
+   226→      vx -= (1 + e) * vn * c.nx;
+   227→      vy -= (1 + e) * vn * c.ny;
+   228→    }
+   229→  }
+   230→  return { x, y, vx, vy };
+   231→}
+   232→
+   233→function resolveBounds(x: number, y: number, r: number, vx: number, vy: number, e: number) {
+   234→  let hit = false;
+   235→  if (x < PAD + r) { x = PAD + r; if (vx < 0) { vx = -vx * e; hit = true; } }
+   236→  if (x > WORLD_W - PAD - r) { x = WORLD_W - PAD - r; if (vx > 0) { vx = -vx * e; hit = true; } }
+   237→  if (y < PAD + r) { y = PAD + r; if (vy < 0) { vy = -vy * e; hit = true; } }
+   238→  if (y > WORLD_H - PAD - r) { y = WORLD_H - PAD - r; if (vy > 0) { vy = -vy * e; hit = true; } }
+   239→  return { x, y, vx, vy, hit };
+   240→}
+   241→
+   242→function interceptAngle(sx: number, sy: number, tx: number, ty: number, tvx: number, tvy: number, speed: number) {
+   243→  const dx = tx - sx;
+   244→  const dy = ty - sy;
+   245→  const a = tvx * tvx + tvy * tvy - speed * speed;
+   246→  const b = 2 * (dx * tvx + dy * tvy);
+   247→  const c = dx * dx + dy * dy;
+   248→  let t = -1;
+   249→  if (Math.abs(a) < 1e-4) {
+   250→    if (Math.abs(b) > 1e-4) t = -c / b;
+   251→  } else {
+   252→    const disc = b * b - 4 * a * c;
+   253→    if (disc >= 0) {
+   254→      const sq = Math.sqrt(disc);
+   255→      const t1 = (-b - sq) / (2 * a);
+   256→      const t2 = (-b + sq) / (2 * a);
+   257→      t = Math.min(t1, t2);
+   258→      if (t < 0) t = Math.max(t1, t2);
+   259→    }
+   260→  }
+   261→  if (!Number.isFinite(t) || t < 0) t = Math.hypot(dx, dy) / speed;
+   262→  t = Math.min(t, 400);
+   263→  return Math.atan2(dy + tvy * t, dx + tvx * t);
+   264→}
+   265→
+   266→function rr(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+   267→  const rad = Math.min(r, w / 2, h / 2);
+   268→  ctx.beginPath();
+   269→  ctx.moveTo(x + rad, y);
+   270→  ctx.arcTo(x + w, y, x + w, y + h, rad);
+   271→  ctx.arcTo(x + w, y + h, x, y + h, rad);
+   272→  ctx.arcTo(x, y + h, x, y, rad);
+   273→  ctx.arcTo(x, y, x + w, y, rad);
+   274→  ctx.closePath();
+   275→}
+   276→
+   277→/* ===================== tank stat derivation ============================ */
+   278→
+   279→function computeParams(tank: TankSpec, upgrades: Record<string, number>): TankParams {
+   280→  const p = effStat(tank, 'power', upgrades);
+   281→  const rate = effStat(tank, 'rate', upgrades);
+   282→  const spd = effStat(tank, 'speed', upgrades);
+   283→  const arm = effStat(tank, 'armor', upgrades);
+   284→  const en = effStat(tank, 'energy', upgrades);
+   285→  return {
+   286→    damage: 1 + Math.floor(p / 3.2),
+   287→    fireCd: Math.round(380 - rate * 20),
+   288→    speed: 2.55 + spd * 0.2,
+   289→    maxHp: 2 + Math.round(arm),
+   290→    energyRate: 3.6 + en * 0.55,
+   291→    chain: tank.id === 'tesla',
+   292→    splash: tank.id === 'volcano',
+   293→    pierce: tank.id === 'prism',
+   294→    blink: tank.id === 'mirage',
+   295→    regen: tank.id === 'omega',
+   296→    special: tank.special,
+   297→  };
+   298→}
+   299→
+   300→const DRONE_KIND_COLORS: Record<DroneKind, string> = {
+   301→  scout: '#4ade80', gunner: '#38bdf8', sniper: '#c084fc', boss: '#f43f5e',
+   302→};
+   303→
+   304→function droneKindFor(m: MissionDef, i: number): DroneKind {
+   305→  const rng = mulberry32(m.seed * 31 + i * 7);
+   306→  const roll = rng();
+   307→  if (m.level >= 3 && roll < 0.22) return 'sniper';
+   308→  if (roll < 0.5) return 'scout';
+   309→  return 'gunner';
+   310→}
+   311→
+   312→/* ============================ component ================================ */
+   313→
+   314→export function TinkTankGame({ onExit }: { onExit: () => void }) {
+   315→  const { t, locale, perfMode } = useApp();
+   316→  const rtl = locale === 'fa' || locale === 'ar';
+   317→
+   318→  useGameSession(true);
+   319→
+   320→  const [booted, setBooted] = useState(false);
+   321→  const [screen, setScreen] = useState<Screen>('menu');
+   322→  const [save, setSave] = useState<TTSave>(() => defaultSave());
+   323→  const [saveLoaded, setSaveLoaded] = useState(false);
+   324→  const [selLevel, setSelLevel] = useState(1);
+   325→  const [selMission, setSelMission] = useState(0);
+   326→  const [runKey, setRunKey] = useState(0);
+   327→  const [phase, setPhase] = useState<Phase>('banner');
+   328→  const [banner, setBanner] = useState<{ text: string; sub?: string; danger?: boolean; key: number } | null>(null);
+   329→  const [hud, setHud] = useState<HudMirror | null>(null);
+   330→  const [result, setResult] = useState<{ r: RunResult; money: number; xp: number; firstClear: boolean; newStars: number; levelCleared: boolean; rewards: ArcadeSubmitResult | null } | null>(null);
+   331→  const [levelModal, setLevelModal] = useState<{ score: number; money: number; stars: number; starsMax: number; rewards: ArcadeSubmitResult | null } | null>(null);
+   332→  const [hasTouch, setHasTouch] = useState(false);
+   333→  const [portrait, setPortrait] = useState(false);
+   334→
+   335→  const gRef = useRef<Game | null>(null);
+   336→  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+   337→  const saveRef = useRef(save);
+   338→  const fireKeyRef = useRef(false);
+   339→  const fireMouseRef = useRef(false);
+   340→  const fireBtnRef = useRef(false);
+   341→  const stickTapRef = useRef(0);
+   342→  const bannerKeyRef = useRef(1);
+   343→  const endRef = useRef<(r: RunResult) => void>(() => undefined);
+   344→  const selLevelRef = useRef(1);
+   345→  const selMissionRef = useRef(0);
+   346→
+   347→  useEffect(() => { saveRef.current = save; }, [save]);
+   348→  useEffect(() => {
+   349→    endRef.current = (r) => finishMission(r);
+   350→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   351→  }, []);
+   352→
+   353→  /* load save + touch detection once (client) */
+   354→  useEffect(() => {
+   355→    setSave(loadTTSave());
+   356→    setSaveLoaded(true);
+   357→    setHasTouch(isTouchDevice());
+   358→    const orient = () => setPortrait(window.innerHeight > window.innerWidth * 1.05);
+   359→    orient();
+   360→    window.addEventListener('resize', orient);
+   361→    window.addEventListener('orientationchange', orient);
+   362→    return () => { window.removeEventListener('resize', orient); window.removeEventListener('orientationchange', orient); };
+   363→  }, []);
+   364→
+   365→  const persist = useCallback((next: TTSave) => {
+   366→    saveTTSave(next);
+   367→    setSave({ ...next });
+   368→  }, []);
+   369→
+   370→  const showBanner = useCallback((text: string, sub?: string, danger?: boolean) => {
+   371→    bannerKeyRef.current += 1;
+   372→    setBanner({ text, sub, danger, key: bannerKeyRef.current });
+   373→  }, []);
+   374→
+   375→  const dNum = useCallback((n: number | string) => localizeDigits(n, locale), [locale]);
+   376→
+   377→  /* ---------------- mission completion bookkeeping ---------------- */
+   378→  const finishMission = (r: RunResult) => {
+   379→    const s = saveRef.current;
+   380→    const level = selLevelRef.current;
+   381→    const index = selMissionRef.current;
+   382→    const count = missionsInLevel(level);
+   383→    const mission = buildMission(level, index);
+   384→
+   385→    /* stars: win / clean (≤1 hit) / under par */
+   386→    let stars = 0;
+   387→    if (r.won) {
+   388→      stars = 1;
+   389→      if (r.hits <= 1) stars += 1;
+   390→      if (r.timeMs <= mission.parMs) stars += 1;
+   391→    }
+   392→
+   393→    const rec = s.levels[String(level)] ?? { stars: Array.from({ length: count }, () => 0), cleared: false };
+   394→    if (rec.stars.length < count) rec.stars = Array.from({ length: count }, (_, i) => rec.stars[i] ?? 0);
+   395→    const prevStars = rec.stars[index] ?? 0;
+   396→    const firstClear = prevStars === 0;
+   397→    const newStars = Math.max(0, stars - prevStars);
+   398→    if (r.won) rec.stars[index] = Math.max(prevStars, stars);
+   399→    const levelCleared = r.won && index === count - 1;
+   400→    if (levelCleared) rec.cleared = true;
+   401→    s.levels[String(level)] = rec;
+   402→
+   403→    let money = 0;
+   404→    let xp = 0;
+   405→    if (r.won) {
+   406→      const rw = missionReward(mission, firstClear, newStars, stars);
+   407→      money = rw.money + (mission.kind === 'boss' ? 120 : 0);
+   408→      xp = rw.xp + 3 * mission.level;
+   409→      s.money += money;
+   410→      addDriverXp(s, xp);
+   411→      s.stats.missions += 1;
+   412→      s.stats.kills += r.kills;
+   413→      if (r.bossKill) s.stats.bossKills += 1;
+   414→      if (r.hits === 0) s.stats.perfect += 1;
+   415→      if (r.score > s.stats.bestScore) s.stats.bestScore = r.score;
+   416→    } else {
+   417→      s.stats.deaths += 1;
+   418→    }
+   419→    persist(s);
+   420→
+   421→    /* shared platform economy (id stays 'mazemind' for continuity) */
+   422→    if (levelCleared) {
+   423→      setLevelModal({ score: r.score, money, stars: rec.stars.reduce((a, b) => a + b, 0), starsMax: count * 3, rewards: null });
+   424→    }
+   425→    if (r.won && useApp.getState().user) {
+   426→      submitArcade('mazemind', r.score, { level, mission: index, kind: mission.kind, stars, acc: r.acc })
+   427→        .then((res) => {
+   428→          if (res) announceArcadeRewards(res);
+   429→          if (levelCleared) {
+   430→            setLevelModal((prev) => (prev ? { ...prev, rewards: res } : prev));
+   431→          } else {
+   432→            setResult((prev) => (prev ? { ...prev, rewards: res } : prev));
+   433→          }
+   434→        })
+   435→        .catch(() => undefined);
+   436→    }
+   437→
+   438→    if (r.won) sfx.win();
+   439→    else sfx.lose();
+   440→
+   441→    if (!levelCleared) setResult({ r, money, xp, firstClear, newStars, levelCleared, rewards: null });
+   442→  };
+   443→
+   444→  /* refs mirroring the latest selection for the engine callbacks */
+   445→  useEffect(() => { selLevelRef.current = selLevel; selMissionRef.current = selMission; }, [selLevel, selMission]);
+   446→
+   447→  /* ---------------- deploy / retry / leave ---------------- */
+   448→  const deploy = useCallback((level: number, index: number) => {
+   449→    setSelLevel(level);
+   450→    setSelMission(index);
+   451→    setResult(null);
+   452→    setLevelModal(null);
+   453→    setBanner(null);
+   454→    setHud(null);
+   455→    setPhase('banner');
+   456→    setRunKey((k) => k + 1);
+   457→    setScreen('game');
+   458→    sfx.click();
+   459→  }, []);
+   460→
+   461→  const retry = useCallback(() => {
+   462→    setRunKey((k) => k + 1);
+   463→    setResult(null);
+   464→    setLevelModal(null);
+   465→    setBanner(null);
+   466→    setHud(null);
+   467→    setPhase('banner');
+   468→    sfx.click();
+   469→  }, []);
+   470→
+   471→  const toLevelMap = useCallback(() => {
+   472→    gRef.current = null;
+   473→    setScreen('level');
+   474→    setResult(null);
+   475→    setLevelModal(null);
+   476→    sfx.click();
+   477→  }, []);
+   478→
+   479→  /* ---------------- garage actions ---------------- */
+   480→  const buyTank = (tank: TankSpec) => {
+   481→    const s = saveRef.current;
+   482→    if (s.ownedTanks.includes(tank.id)) return;
+   483→    if (s.driverLevel < tank.reqLevel) { sfx.bad(); return; }
+   484→    if (s.money < tank.price) { sfx.bad(); toast.error(t('tt_not_enough_money')); return; }
+   485→    s.money -= tank.price;
+   486→    s.ownedTanks.push(tank.id);
+   487→    s.selectedTank = tank.id;
+   488→    persist(s);
+   489→    sfx.achievement();
+   490→    toast.success(`🔧 ${tankName(tank, locale)}`);
+   491→  };
+   492→
+   493→  const selectTank = (tank: TankSpec) => {
+   494→    const s = saveRef.current;
+   495→    if (!s.ownedTanks.includes(tank.id)) return;
+   496→    s.selectedTank = tank.id;
+   497→    persist(s);
+   498→    sfx.click();
+   499→  };
+   500→
+   501→  const upgradeStat = (tank: TankSpec, stat: TTStat) => {
+   502→    const s = saveRef.current;
+   503→    const key = `${tank.id}:${stat}`;
+   504→    const tier = s.upgrades[key] ?? 0;
+   505→    if (tier >= 5) return;
+   506→    const cost = upgradeCost(tank, tier);
+   507→    if (s.money < cost) { sfx.bad(); toast.error(t('tt_not_enough_money')); return; }
+   508→    s.money -= cost;
+   509→    s.upgrades[key] = tier + 1;
+   510→    persist(s);
+   511→    sfx.levelup();
+   512→  };
+   513→
+   514→  /* =================== the simulation / render loop ==================== */
+   515→  useEffect(() => {
+   516→    if (screen !== 'game') return;
+   517→    const canvas = canvasRef.current;
+   518→    if (!canvas) return;
+   519→    const ctx = canvas.getContext('2d');
+   520→    if (!ctx) return;
+   521→
+   522→    const saveNow = saveRef.current;
+   523→    const tank = TANK_BY_ID[saveNow.selectedTank] ?? TANKS[0];
+   524→    const level = selLevelRef.current;
+   525→    const index = selMissionRef.current;
+   526→    const mission = buildMission(level, index);
+   527→    const arena = buildArena(mission);
+   528→    const params = computeParams(tank, saveNow.upgrades);
+   529→    const theme = THEMES[arena.theme];
+   530→    const lowFx = perfMode || canvas.clientWidth < 460;
+   531→    const dpr = Math.min(perfMode ? 1 : 2, window.devicePixelRatio || 1);
+   532→
+   533→    /* ---- backing store ---- */
+   534→    const resize = () => {
+   535→      const w = canvas.clientWidth || 640;
+   536→      canvas.width = Math.round(w * dpr);
+   537→      canvas.height = Math.round(w * (VIEW_H / VIEW_W) * dpr);
+   538→    };
+   539→    resize();
+   540→    const ro = new ResizeObserver(resize);
+   541→    ro.observe(canvas);
+   542→
+   543→    const dNum2 = (n: number) => localizeDigits(n, useApp.getState().locale);
+   544→
+   545→    /* ---- game state ---- */
+   546→    const g: Game = {
+   547→      phase: 'banner',
+   548→      mission, arena, params,
+   549→      color: tank.color, glow: tank.glow,
+   550→      px: arena.playerSpawn.x, py: arena.playerSpawn.y, pvx: 0, pvy: 0,
+   551→      hullAng: -Math.PI / 2, gunAng: -Math.PI / 2,
+   552→      hp: params.maxHp, fireT: 0, invT: 0, heat: 0, overheated: false,
+   553→      energy: 40, buffT: 0, shieldHits: 0, shieldT: 0, regenT: 0,
+   554→      muzzleT: 0, hitsTaken: 0, kills: 0, bossKill: false,
+   555→      shots: 0, hitCount: 0,
+   556→      trail: [],
+   557→      wave: 0, waveQueue: 0, spawnT: 0, surviveT: mission.surviveMs, halfShown: false, finalShown: false,
+   558→      gen: mission.kind === 'siege'
+   559→        ? { x: WORLD_W / 2, y: WORLD_H / 2, hp: mission.genHp, maxHp: mission.genHp, pulseT: 4000, spin: 0, flashT: 0 }
+   560→        : null,
+   561→      chainDown: 0, chainNext: 0,
+   562→      bossSpawned: mission.kind !== 'boss',
+   563→      camX: clamp(arena.playerSpawn.x - VIEW_W / 2, 0, WORLD_W - VIEW_W),
+   564→      camY: clamp(arena.playerSpawn.y - VIEW_H / 2, 0, WORLD_H - VIEW_H),
+   565→      shake: 0, hitFlash: 0, time: 0, bannerT: 1700,
+   566→      keys: new Set<string>(),
+   567→      aim: { x: WORLD_W / 2, y: 100 }, aimMode: 'auto',
+   568→      stick: { active: false, id: -1, ox: 0, oy: 0, dx: 0, dy: 0 },
+   569→      drones: [], bullets: [], pickups: [], parts: [], pops: [], beams: [],
+   570→      startedAt: performance.now(), elapsed: 0,
+   571→    };
+   572→    gRef.current = g;
+   573→
+   574→    let idSeq = 1;
+   575→    let finished = false;
+   576→    const timers: number[] = [];
+   577→    const addTimer = (id: number) => timers.push(id);
+   578→
+   579→    /* ---- factories ---- */
+   580→    const burst = (x: number, y: number, c: string, n: number, speed: number) => {
+   581→      const cap = lowFx ? Math.ceil(n / 2) : n;
+   582→      for (let i = 0; i < cap; i++) {
+   583→        const a = Math.random() * Math.PI * 2;
+   584→        const v = speed * (0.25 + Math.random() * 0.95);
+   585→        g.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 320 + Math.random() * 520, max: 840, c, r: 1.4 + Math.random() * 2.4 });
+   586→      }
+   587→      if (g.parts.length > (lowFx ? MAX_PARTS / 2 : MAX_PARTS)) g.parts.splice(0, g.parts.length - (lowFx ? MAX_PARTS / 2 : MAX_PARTS));
+   588→    };
+   589→
+   590→    const pop = (x: number, y: number, txt: string, c: string) => {
+   591→      g.pops.push({ x, y, txt, c, life: 1100, max: 1100 });
+   592→    };
+   593→
+   594→    const genWall = (): TTWall | null =>
+   595→      g.gen ? { x: g.gen.x - GEN_HALF, y: g.gen.y - GEN_HALF, w: GEN_HALF * 2, h: GEN_HALF * 2 } : null;
+   596→
+   597→    /* ---- drones ---- */
+   598→    const spawnDrone = (kind: DroneKind, x: number, y: number, delay: number) => {
+   599→      const m = g.mission;
+   600→      let hp = m.droneHp;
+   601→      let fireMul = 1;
+   602→      if (kind === 'scout') { fireMul = 1.35; }
+   603→      if (kind === 'sniper') { fireMul = 1.5; hp += 1; }
+   604→      const hpCap = Math.min(hp, 4);
+   605→      g.drones.push({
+   606→        id: idSeq++, kind, x, y, vx: 0, vy: 0,
+   607→        hp: hpCap, maxHp: hpCap,
+   608→        state: 'spawn', spawnT: 620 + delay,
+   609→        fireT: m.fireMs * fireMul * (0.8 + Math.random() * 0.5),
+   610→        aimT: 0, losLost: 0, stuckT: 0,
+   611→        bodyAng: Math.random() * Math.PI * 2,
+   612→        gunAng: Math.atan2(g.py - y, g.px - x),
+   613→        wp: { x, y },
+   614→        orbitDir: Math.random() < 0.5 ? 1 : -1,
+   615→        dodgeT: 0, dodgeAng: 0, flashT: 0, spin: Math.random() * Math.PI * 2,
+   616→      });
+   617→    };
+   618→
+   619→    const spawnBoss = () => {
+   620→      const m = g.mission;
+   621→      const hp = 26 + m.level * 2;
+   622→      const bx = WORLD_W / 2;
+   623→      const by = 170;
+   624→      g.drones.push({
+   625→        id: idSeq++, kind: 'boss', x: bx, y: by, vx: 0, vy: 0,
+   626→        hp, maxHp: hp, state: 'spawn', spawnT: 1400,
+   627→        fireT: 1600, aimT: 0, losLost: 0, stuckT: 0,
+   628→        bodyAng: 0, gunAng: 0, wp: { x: bx, y: by },
+   629→        orbitDir: 1, dodgeT: 0, dodgeAng: 0, flashT: 0, spin: 0,
+   630→        phase: 1, burstT: 0, burstN: 0, ringT: 2600, spiralAng: 0, minionT: 9000, stunT: 0,
+   631→      });
+   632→      g.shake = Math.max(g.shake, 1);
+   633→    };
+   634→
+   635→    const pickSpawn = (): { x: number; y: number } => {
+   636→      const spots = g.arena.droneSpawns;
+   637→      for (let i = 0; i < 8; i++) {
+   638→        const s = spots[Math.floor(Math.random() * spots.length)];
+   639→        if (Math.hypot(s.x - g.px, s.y - g.py) > 260 && pointFree(s.x, s.y, DRONE_R + 8, g.arena.walls)) return s;
+   640→      }
+   641→      const s = spots[Math.floor(Math.random() * spots.length)];
+   642→      return { x: s.x, y: s.y };
+   643→    };
+   644→
+   645→    const freePointNear = (x: number, y: number, r: number): { x: number; y: number } => {
+   646→      if (pointFree(x, y, r, g.arena.walls)) return { x, y };
+   647→      for (let i = 0; i < 14; i++) {
+   648→        const a = Math.random() * Math.PI * 2;
+   649→        const d = 30 + Math.random() * 110;
+   650→        const nx = clamp(x + Math.cos(a) * d, PAD + 30, WORLD_W - PAD - 30);
+   651→        const ny = clamp(y + Math.sin(a) * d, PAD + 30, WORLD_H - PAD - 30);
+   652→        if (pointFree(nx, ny, r, g.arena.walls)) return { x: nx, y: ny };
+   653→      }
+   654→      return { x: g.arena.playerSpawn.x, y: g.arena.playerSpawn.y };
+   655→    };
+   656→
+   657→    const deactivateDrone = (d: Drone, idx: number) => {
+   658→      const col = DRONE_KIND_COLORS[d.kind];
+   659→      burst(d.x, d.y, col, d.kind === 'boss' ? 42 : 15, d.kind === 'boss' ? 4.4 : 3);
+   660→      burst(d.x, d.y, '#fbbf24', d.kind === 'boss' ? 26 : 8, 2.2);
+   661→      const pts = d.kind === 'boss' ? SCORE_BOSS + g.mission.level * 10 : SCORE_KILL_BASE + g.mission.level * 4;
+   662→      g.kills += 1;
+   663→      if (d.kind === 'boss') g.bossKill = true;
+   664→      pop(d.x, d.y - 18, `+${dNum2(pts)}`, '#fbbf24');
+   665→      g.drones.splice(idx, 1);
+   666→      g.shake = Math.max(g.shake, d.kind === 'boss' ? 1.4 : 0.35);
+   667→      sfx.capture();
+   668→      /* loot */
+   669→      if (d.kind !== 'boss' && Math.random() < DROP_CHANCE) {
+   670→        const spot = freePointNear(d.x, d.y, 12);
+   671→        const roll = Math.random();
+   672→        const kind: Pickup['kind'] = roll < 0.4 ? 'shield' : roll < 0.72 ? 'repair' : 'energy';
+   673→        g.pickups.push({ id: idSeq++, x: spot.x, y: spot.y, kind, t: 0, life: PICKUP_LIFE });
+   674→      }
+   675→      if (d.kind === 'boss') {
+   676→        addTimer(window.setTimeout(() => winMission(), 1000));
+   677→      }
+   678→    };
+   679→
+   680→    /* ---- mission endings ---- */
+   681→    const winMission = () => {
+   682→      if (finished || g.phase === 'won' || g.phase === 'lost') return;
+   683→      finished = true;
+   684→      g.phase = 'won';
+   685→      const timeMs = g.elapsed;
+   686→      const acc = g.shots > 0 ? Math.round((g.hitCount / g.shots) * 100) : 100;
+   687→      let score = SCORE_WIN + g.mission.level * 8;
+   688→      score += g.kills * (SCORE_KILL_BASE + g.mission.level * 4);
+   689→      if (g.bossKill) score += SCORE_BOSS;
+   690→      if (g.hitsTaken === 0) score += SCORE_PERFECT;
+   691→      if (timeMs <= g.mission.parMs) score += 80;
+   692→      score = Math.min(score, 2000);
+   693→      setPhase('won');
+   694→      endRef.current({ won: true, score, stars: 0, timeMs, hits: g.hitsTaken, acc, kills: g.kills, bossKill: g.bossKill });
+   695→    };
+   696→
+   697→    const loseMission = () => {
+   698→      if (finished || g.phase === 'won' || g.phase === 'lost') return;
+   699→      finished = true;
+   700→      g.phase = 'lost';
+
+[showing lines 1-700 of 3079; use offset=701 with limit to continue reading]

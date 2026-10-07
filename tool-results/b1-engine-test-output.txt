@@ -1,0 +1,27 @@
+(a) parse + solver replay with default power 1
+  ✓ all 48 levels parse + solutions replay par-exact (default power 1) — 24 + 24 levels
+(b) chain push
+  ✓ default power 1 refuses a 2-boulder line
+  ✓ power 2 moves both boulders in ONE push action — player=10 boulders=[11,12]
+  ✓ player ends on the first boulder's old cell
+  ✓ chain result: boulders at 11,12
+  ✓ chain blocked by wall ahead stays invalid
+  ✓ chain landing in pit: front boulder swallowed, pit filled — swallowed=10 boulders=[9]
+  ✓ chain of 3 needs power 3
+  ✓ vertical chain push works — boulders=[8,15]
+(c) dig converts pit → floor
+  ✓ dig with no pit ahead is a no-op (identical state)
+  ✓ dig fills the pit ahead
+  ✓ player stays in place after dig
+  ✓ dug cell is now walkable
+  ✓ undo across dig restores the pit
+(d) grab / drop roundtrip
+  ✓ grab lifts the boulder ahead (cell becomes floor)
+  ✓ grabbing forces solved=false
+  ✓ drop places the boulder back on the freed cell ahead (player never moved)
+  ✓ grab/drop roundtrip restores the original board
+  ✓ dropping into a pit fills it (documented choice)
+  ✓ undo across grab→walk→walk→drop steps back cleanly
+  ✓ facing tracks the last move direction
+
+ENGINE ABILITY TESTS: ALL PASS ✓

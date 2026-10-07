@@ -1,0 +1,1204 @@
+     1→     1→'use client';
+     2→     2→
+     3→     3→/**
+     4→     4→ * StoreView — "بازار دوئل" (Duel Bazaar): category tabs, item grid with
+     5→     5→ * procedural pixel-art previews, coin/level-gated buying (confirm dialog)
+     6→     6→ * and one-click equip. /api/store is the source of truth; the useApp
+     7→     7→ * session (coins / equipped fields) is kept in sync after every action.
+     8→     8→ */
+     9→     9→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+    10→    10→import Image from 'next/image';
+    11→    11→import { AnimatePresence, motion } from 'framer-motion';
+    12→    12→import { useApp } from '@/store/app';
+    13→    13→import { api } from '@/lib/api';
+    14→    14→import { localizeDigits, type Locale, type TKey } from '@/lib/i18n';
+    15→    15→import { RARITY_META, type ItemCategory, type Rarity } from '@/lib/game/content';
+    16→    16→import { AvatarBubble, PieceDisc } from '@/components/shared/PixelSprite';
+    17→    17→import { sfx } from '@/lib/sound';
+    18→    18→import { toast } from 'sonner';
+    19→    19→import { Badge } from '@/components/ui/badge';
+    20→    20→import { Button } from '@/components/ui/button';
+    21→    21→import { Skeleton } from '@/components/ui/skeleton';
+    22→    22→import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+    23→    23→import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+    24→    24→import {
+    25→    25→  AlertDialog,
+    26→    26→  AlertDialogAction,
+    27→    27→  AlertDialogCancel,
+    28→    28→  AlertDialogContent,
+    29→    29→  AlertDialogDescription,
+    30→    30→  AlertDialogFooter,
+    31→    31→  AlertDialogHeader,
+    32→    32→  AlertDialogTitle,
+    33→    33→} from '@/components/ui/alert-dialog';
+    34→    34→import {
+    35→    35→  Coins,
+    36→    36→  Eye,
+    37→    37→  EyeOff,
+    38→    38→  Gift,
+    39→    39→  Package,
+    40→    40→  PackageOpen,
+    41→    41→  ShieldCheck,
+    42→    42→  Sparkles,
+    43→    43→} from 'lucide-react';
+    44→    44→import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+    45→    45→
+    46→    46→/* ================= types & helpers ================= */
+    47→    47→
+    48→    48→interface StoreItemDTO {
+    49→    49→  code: string;
+    50→    50→  category: ItemCategory;
+    51→    51→  rarity: Rarity;
+    52→    52→  price: number;
+    53→    53→  requiredLevel: number;
+    54→    54→  data: Record<string, unknown>;
+    55→    55→  active: boolean;
+    56→    56→  sales: number;
+    57→    57→}
+    58→    58→
+    59→    59→interface StoreMe {
+    60→    60→  coins: number;
+    61→    61→  level: number;
+    62→    62→  pieceSkin: string;
+    63→    63→  boardSkin: string;
+    64→    64→  background: string;
+    65→    65→  effectSkin: string;
+    66→    66→  avatarItem: string;
+    67→    67→  titleItem: string | null;
+    68→    68→}
+    69→    69→
+    70→    70→type EquipField = 'pieceSkin' | 'boardSkin' | 'background' | 'effectSkin' | 'avatarItem' | 'titleItem';
+    71→    71→
+    72→    72→const CATS: ItemCategory[] = ['PIECE', 'BOARD', 'AVATAR', 'BACKGROUND', 'EFFECT', 'TITLE'];
+    73→    73→
+    74→    74→const EQUIP_FIELD: Record<ItemCategory, EquipField> = {
+    75→    75→  PIECE: 'pieceSkin',
+    76→    76→  BOARD: 'boardSkin',
+    77→    77→  BACKGROUND: 'background',
+    78→    78→  EFFECT: 'effectSkin',
+    79→    79→  AVATAR: 'avatarItem',
+    80→    80→  TITLE: 'titleItem',
+    81→    81→};
+    82→    82→
+    83→    83→/** 'piece_rose' → 'Rose', 'bg_royal_velvet' → 'Royal velvet' */
+    84→    84→function prettyName(code: string): string {
+    85→    85→  const s = code.split('_').slice(1).join(' ').trim();
+    86→    86→  return s ? s.charAt(0).toUpperCase() + s.slice(1) : code;
+    87→    87→}
+    88→    88→
+    89→    89→/** Immutably write the equipped code into the right skin/avatar/title field. */
+    90→    90→function equipApply<T extends { pieceSkin: string; boardSkin: string; background: string; effectSkin: string; avatarItem: string; titleItem: string | null }>(
+    91→    91→  obj: T,
+    92→    92→  field: EquipField,
+    93→    93→  code: string,
+    94→    94→): T {
+    95→    95→  const next = { ...obj };
+    96→    96→  if (field === 'pieceSkin') next.pieceSkin = code;
+    97→    97→  else if (field === 'boardSkin') next.boardSkin = code;
+    98→    98→  else if (field === 'background') next.background = code;
+    99→    99→  else if (field === 'effectSkin') next.effectSkin = code;
+   100→   100→  else if (field === 'avatarItem') next.avatarItem = code;
+   101→   101→  else next.titleItem = code;
+   102→   102→  return next;
+   103→   103→}
+   104→   104→
+   105→   105→/* ================= category previews (pure CSS / pixel sprites) ================= */
+   106→   106→
+   107→   107→function ItemPreview({ item, glow }: { item: StoreItemDTO; glow: boolean }) {
+   108→   108→  const d = item.data as { cell?: string; cell2?: string; hole?: string; numeral?: string; colors?: string[]; accent?: string };
+   109→   109→
+   110→   110→  switch (item.category) {
+   111→   111→    case 'PIECE':
+   112→   112→      return (
+   113→   113→        <div style={glow ? { filter: `drop-shadow(0 0 7px ${RARITY_META[item.rarity].glow})` } : undefined}>
+   114→   114→          <PieceDisc code={item.code} side={1} size={64} />
+   115→   115→        </div>
+   116→   116→      );
+   117→   117→    case 'AVATAR':
+   118→   118→      return <AvatarBubble code={item.code} size={64} glow={glow} />;
+   119→   119→    case 'BOARD': {
+   120→   120→      const cell = d.cell ?? '#e3b878';
+   121→   121→      const cell2 = d.cell2 ?? '#d9a860';
+   122→   122→      const hole = d.hole ?? '#faf6ee';
+   123→   123→      const numeral = d.numeral ?? '#4a2e12';
+   124→   124→      return (
+   125→   125→        <div
+   126→   126→          className="grid h-16 w-16 place-items-center rounded-lg"
+   127→   127→          style={{
+   128→   128→            background: `linear-gradient(135deg, ${cell}, ${cell2})`,
+   129→   129→            border: `2px solid ${numeral}`,
+   130→   130→            boxShadow: 'inset 0 1px 5px rgba(0,0,0,.35)',
+   131→   131→          }}
+   132→   132→        >
+   133→   133→          <span className="block h-3.5 w-3.5 rounded-full" style={{ background: hole, boxShadow: `0 0 6px ${numeral}` }} />
+   134→   134→        </div>
+   135→   135→      );
+   136→   136→    }
+   137→   137→    case 'BACKGROUND': {
+   138→   138→      const c = d.colors ?? ['#0f0524', '#1e1145', '#2a1a5e'];
+   139→   139→      const accent = d.accent ?? '#d4af37';
+   140→   140→      return (
+   141→   141→        <div
+   142→   142→          className="relative h-16 w-16 overflow-hidden rounded-lg border border-white/15"
+   143→   143→          style={{ background: `linear-gradient(135deg, ${c[0] ?? '#000'}, ${c[1] ?? '#111'} 55%, ${c[2] ?? '#222'})` }}
+   144→   144→        >
+   145→   145→          <span
+   146→   146→            className="absolute bottom-1.5 end-1.5 block h-2.5 w-2.5 rounded-full"
+   147→   147→            style={{ background: accent, boxShadow: `0 0 8px ${accent}` }}
+   148→   148→          />
+   149→   149→        </div>
+   150→   150→      );
+   151→   151→    }
+   152→   152→    case 'EFFECT': {
+   153→   153→      const c = d.colors ?? ['#fbbf24', '#f472b6', '#34d399', '#c084fc'];
+   154→   154→      return (
+   155→   155→        <div
+   156→   156→          className="grid h-16 w-16 place-items-center text-[34px]"
+   157→   157→          style={{
+   158→   158→            background: `linear-gradient(135deg, ${c.join(', ')})`,
+   159→   159→            WebkitBackgroundClip: 'text',
+   160→   160→            backgroundClip: 'text',
+   161→   161→            color: 'transparent',
+   162→   162→          }}
+   163→   163→          aria-hidden
+   164→   164→        >
+   165→   165→          🎉
+   166→   166→        </div>
+   167→   167→      );
+   168→   168→    }
+   169→   169→    case 'TITLE':
+   170→   170→      return (
+   171→   171→        <div className="flex h-16 w-16 flex-col items-center justify-center gap-1 rounded-lg bg-amber-400/10">
+   172→   172→          <span className="text-2xl" aria-hidden>
+   173→   173→            👑
+   174→   174→          </span>
+   175→   175→          <span className="max-w-14 truncate text-[9px] font-black text-amber-300">{prettyName(item.code)}</span>
+   176→   176→        </div>
+   177→   177→      );
+   178→   178→    default:
+   179→   179→      return null;
+   180→   180→  }
+   181→   181→}
+   182→   182→
+   183→   183→/* ================= v0.1.0-alpha: Fortune Chests (صندوق‌های شانس) ================= */
+   184→   184→
+   185→   185→type DropKind = 'COINS' | 'XP' | 'ITEM';
+   186→   186→
+   187→   187→interface MarketDropDTO {
+   188→   188→  id: string;
+   189→   189→  kind: DropKind;
+   190→   190→  itemCode: string | null;
+   191→   191→  amount: number;
+   192→   192→  weight: number;
+   193→   193→}
+   194→   194→
+   195→   195→interface MarketBoxDTO {
+   196→   196→  code: string;
+   197→   197→  rarity: Rarity;
+   198→   198→  price: number;
+   199→   199→  image: string;
+   200→   200→  opens: number;
+   201→   201→  drops: MarketDropDTO[];
+   202→   202→}
+   203→   203→
+   204→   204→interface BoxGrantDTO {
+   205→   205→  id: string;
+   206→   206→  boxCode: string;
+   207→   207→  source: string; // PURCHASE | GIFT | ADMIN
+   208→   208→  createdAt: string;
+   209→   209→}
+   210→   210→
+   211→   211→interface OpenResultDTO {
+   212→   212→  ok: boolean;
+   213→   213→  drop: { kind: DropKind; itemCode: string | null; amount: number };
+   214→   214→  item: { code: string; dupe: boolean; refund: number; rarity: string } | null;
+   215→   215→  coinsDelta: number;
+   216→   216→  xpDelta: number;
+   217→   217→  levelUps: number;
+   218→   218→  user: { coins: number; xp: number; level: number };
+   219→   219→  unlockedAchievements: { id: string; coins: number; rarity: string }[];
+   220→   220→}
+   221→   221→
+   222→   222→type StoreTab = 'CHESTS' | ItemCategory;
+   223→   223→
+   224→   224→/** Fallback emoji when an ITEM drop has no procedural preview available. */
+   225→   225→const ITEM_EMOJI: Record<string, string> = {
+   226→   226→  piece: '⚪',
+   227→   227→  board: '▦',
+   228→   228→  avatar: '🙂',
+   229→   229→  background: '🖼️',
+   230→   230→  effect: '✨',
+   231→   231→  title: '👑',
+   232→   232→};
+   233→   233→
+   234→   234→/**
+   235→   235→ * Chest artwork. The /art renders are 1024² with a dark backdrop, so they sit
+   236→   236→ * on a dark rounded+ring tile and use mix-blend-screen to melt into any bg.
+   237→   237→ * If the png is missing (404), we gracefully fall back to a rarity-tinted
+   238→   238→ * gradient tile with a gift emoji — the experience never breaks.
+   239→   239→ */
+   240→   240→function ChestGlyph({ rarity, size }: { rarity: Rarity; size: number }) {
+   241→   241→  const meta = RARITY_META[rarity];
+   242→   242→  return (
+   243→   243→    <span style={{ fontSize: Math.round(size * 0.42), filter: `drop-shadow(0 0 10px ${meta.glow})` }} aria-hidden>
+   244→   244→      🎁
+   245→   245→    </span>
+   246→   246→  );
+   247→   247→}
+   248→   248→
+   249→   249→function ChestArt({ image, rarity, size }: { image: string; rarity: Rarity; size: number }) {
+   250→   250→  const meta = RARITY_META[rarity];
+   251→   251→  return (
+   252→   252→    <div
+   253→   253→      className="relative grid shrink-0 place-items-center overflow-hidden rounded-2xl ring-1 ring-white/10"
+   254→   254→      style={{
+   255→   255→        width: size,
+   256→   256→        height: size,
+   257→   257→        background: `radial-gradient(120% 120% at 50% 18%, ${meta.color}2e 0%, #06060e 62%)`,
+   258→   258→        boxShadow: `0 0 ${Math.round(size / 4)}px ${meta.glow}, inset 0 0 16px rgba(0,0,0,.55)`,
+   259→   259→      }}
+   260→   260→    >
+   261→   261→      {image ? (
+   262→   262→        <ChestImg key={image} image={image} rarity={rarity} size={size} />
+   263→   263→      ) : (
+   264→   264→        <ChestGlyph rarity={rarity} size={size} />
+   265→   265→      )}
+   266→   266→    </div>
+   267→   267→  );
+   268→   268→}
+   269→   269→
+   270→   270→/** Image loader with per-src error fallback (remounts reset the error state). */
+   271→   271→function ChestImg({ image, rarity, size }: { image: string; rarity: Rarity; size: number }) {
+   272→   272→  const [err, setErr] = useState(false);
+   273→   273→  if (err) return <ChestGlyph rarity={rarity} size={size} />;
+   274→   274→  return (
+   275→   275→    <Image
+   276→   276→      src={image}
+   277→   277→      alt=""
+   278→   278→      width={size}
+   279→   279→      height={size}
+   280→   280→      sizes={`${size}px`}
+   281→   281→      className="object-contain mix-blend-screen"
+   282→   282→      style={{ filter: `drop-shadow(0 0 10px ${RARITY_META[rarity].glow})` }}
+   283→   283→      onError={() => setErr(true)}
+   284→   284→    />
+   285→   285→  );
+   286→   286→}
+   287→   287→
+   288→   288→/** Rotating conic-gradient burst rays, revealed behind the reward. */
+   289→   289→function BurstRays({ color }: { color: string }) {
+   290→   290→  return (
+   291→   291→    <motion.div
+   292→   292→      aria-hidden
+   293→   293→      className="pointer-events-none absolute inset-0 m-auto h-[440px] w-[440px] rounded-full"
+   294→   294→      style={{
+   295→   295→        background: `repeating-conic-gradient(from 0deg, ${color}40 0deg 7deg, transparent 7deg 18deg)`,
+   296→   296→        WebkitMaskImage: 'radial-gradient(closest-side, rgba(0,0,0,.95), transparent 74%)',
+   297→   297→        maskImage: 'radial-gradient(closest-side, rgba(0,0,0,.95), transparent 74%)',
+   298→   298→      }}
+   299→   299→      initial={{ opacity: 0, scale: 0.35, rotate: 0 }}
+   300→   300→      animate={{ opacity: [0, 0.9, 0.55], scale: [0.35, 1, 1.1], rotate: 360 }}
+   301→   301→      transition={{
+   302→   302→        opacity: { duration: 0.9 },
+   303→   303→        scale: { duration: 0.8, ease: 'easeOut' },
+   304→   304→        rotate: { duration: 18, repeat: Infinity, ease: 'linear' },
+   305→   305→      }}
+   306→   306→    />
+   307→   307→  );
+   308→   308→}
+   309→   309→
+   310→   310→const CONFETTI_COLORS = ['#fbbf24', '#f472b6', '#34d399', '#c084fc', '#f43f5e', '#38bdf8', '#fde047'];
+   311→   311→
+   312→   312→/** Lightweight confetti — absolutely-positioned animated divs, no new deps. */
+   313→   313→function Confetti({ seed }: { seed: number }) {
+   314→   314→  const parts = useMemo(
+   315→   315→    () =>
+   316→   316→      Array.from({ length: 30 }, (_, i) => ({
+   317→   317→        id: i,
+   318→   318→        x: (Math.random() - 0.5) * 340,
+   319→   319→        y: -(70 + Math.random() * 170),
+   320→   320→        rot: Math.random() * 720 - 360,
+   321→   321→        dur: 1 + Math.random(),
+   322→   322→        delay: Math.random() * 0.18,
+   323→   323→        c: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
+   324→   324→        w: 5 + Math.random() * 6,
+   325→   325→      })),
+   326→   326→    [seed],
+   327→   327→  );
+   328→   328→  return (
+   329→   329→    <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
+   330→   330→      {parts.map((p) => (
+   331→   331→        <motion.span
+   332→   332→          key={`${seed}-${p.id}`}
+   333→   333→          className="absolute left-1/2 top-[38%] block rounded-[2px]"
+   334→   334→          style={{ width: p.w, height: Math.round(p.w * 0.5), background: p.c }}
+   335→   335→          initial={{ x: 0, y: 0, opacity: 1, rotate: 0 }}
+   336→   336→          animate={{ x: p.x, y: [0, p.y, 330], opacity: [1, 1, 0], rotate: p.rot }}
+   337→   337→          transition={{ duration: p.dur + 0.9, delay: p.delay, ease: 'easeOut', times: [0, 0.42, 1] }}
+   338→   338→        />
+   339→   339→      ))}
+   340→   340→    </div>
+   341→   341→  );
+   342→   342→}
+   343→   343→
+   344→   344→/** Big reward icon inside the reveal ring (reuses the item renderers above). */
+   345→   345→function RewardVisual({ kind, itemCode, catalogItem }: { kind: DropKind; itemCode: string | null; catalogItem: StoreItemDTO | null }) {
+   346→   346→  if (kind === 'COINS') return <span className="text-5xl drop-shadow-[0_0_16px_rgba(251,191,36,.85)]" aria-hidden>🪙</span>;
+   347→   347→  if (kind === 'XP') return <span className="text-5xl text-violet-300 drop-shadow-[0_0_16px_rgba(192,132,252,.85)]" aria-hidden>✦</span>;
+   348→   348→  const code = itemCode ?? '';
+   349→   349→  const prefix = code.split('_')[0] ?? '';
+   350→   350→  if (prefix === 'piece') return <PieceDisc code={code} side={1} size={72} />;
+   351→   351→  if (prefix === 'avatar') return <AvatarBubble code={code} size={72} glow />;
+   352→   352→  if (catalogItem) return <ItemPreview item={catalogItem} glow />;
+   353→   353→  return <span className="text-5xl" aria-hidden>{ITEM_EMOJI[prefix] ?? '📦'}</span>;
+   354→   354→}
+   355→   355→
+   356→   356→/** Reveal stage of the opening dialog: burst rays + glow ring + reward card. */
+   357→   357→function RevealContent({
+   358→   358→  result,
+   359→   359→  box,
+   360→   360→  catalog,
+   361→   361→  remaining,
+   362→   362→  seed,
+   363→   363→  t,
+   364→   364→  locale,
+   365→   365→  onAnother,
+   366→   366→  onClose,
+   367→   367→}: {
+   368→   368→  result: OpenResultDTO;
+   369→   369→  box: MarketBoxDTO;
+   370→   370→  catalog: StoreItemDTO[];
+   371→   371→  remaining: number;
+   372→   372→  seed: number;
+   373→   373→  t: (k: TKey) => string;
+   374→   374→  locale: Locale;
+   375→   375→  onAnother: () => void;
+   376→   376→  onClose: () => void;
+   377→   377→}) {
+   378→   378→  const item = result.item;
+   379→   379→  const rar = (item ? (item.rarity as Rarity) : box.rarity);
+   380→   380→  const rmeta = RARITY_META[rar];
+   381→   381→  const catItem = item ? catalog.find((it) => it.code === item.code) ?? null : null;
+   382→   382→  return (
+   383→   383→    <motion.div
+   384→   384→      initial={{ scale: 0.55, opacity: 0 }}
+   385→   385→      animate={{ scale: 1, opacity: 1 }}
+   386→   386→      exit={{ opacity: 0, scale: 0.9 }}
+   387→   387→      transition={{ type: 'spring', stiffness: 240, damping: 17 }}
+   388→   388→      className="relative flex w-full flex-col items-center"
+   389→   389→    >
+   390→   390→      <div className="relative mt-1 grid place-items-center">
+   391→   391→        <BurstRays color={rmeta.color} />
+   392→   392→        <Confetti seed={seed} />
+   393→   393→        <div
+   394→   394→          className="relative grid h-28 w-28 place-items-center rounded-full border-2"
+   395→   395→          style={{
+   396→   396→            borderColor: `${rmeta.color}99`,
+   397→   397→            boxShadow: `0 0 70px ${rmeta.glow}, inset 0 0 26px ${rmeta.glow}`,
+   398→   398→            background: '#06060e',
+   399→   399→          }}
+   400→   400→        >
+   401→   401→          <RewardVisual kind={result.drop.kind} itemCode={result.drop.itemCode} catalogItem={catItem} />
+   402→   402→        </div>
+   403→   403→      </div>
+   404→   404→
+   405→   405→      <div className="mt-3 text-lg font-black gold-text">{t('box_congrats')}</div>
+   406→   406→
+   407→   407→      {result.drop.kind === 'COINS' && (
+   408→   408→        <>
+   409→   409→          <div className="mt-1 text-2xl font-black text-amber-400">+{localizeDigits(result.drop.amount, locale)} 🪙</div>
+   410→   410→          <div className="text-xs font-bold text-muted-foreground">{t('box_won_coins')}</div>
+   411→   411→        </>
+   412→   412→      )}
+   413→   413→      {result.drop.kind === 'XP' && (
+   414→   414→        <>
+   415→   415→          <div className="mt-1 text-2xl font-black text-violet-300">+{localizeDigits(result.drop.amount, locale)} ✦</div>
+   416→   416→          <div className="text-xs font-bold text-muted-foreground">{t('box_won_xp')}</div>
+   417→   417→        </>
+   418→   418→      )}
+   419→   419→      {result.drop.kind === 'ITEM' && item && (
+   420→   420→        <>
+   421→   421→          <div className="mt-1 max-w-full truncate text-base font-black" style={{ color: rmeta.color }}>
+   422→   422→            {prettyName(item.code)}
+   423→   423→          </div>
+   424→   424→          <Badge
+   425→   425→            variant="outline"
+   426→   426→            className="mt-1 text-[9px] font-black"
+   427→   427→            style={{ color: rmeta.color, borderColor: `${rmeta.color}55`, background: `${rmeta.color}14` }}
+   428→   428→          >
+   429→   429→            {t('box_won_item')} · {t(`rarity_${rar}` as TKey)}
+   430→   430→          </Badge>
+   431→   431→          {item.dupe && (
+   432→   432→            <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-400/10 px-3 py-1.5 text-xs font-bold text-amber-300">
+   433→   433→              {t('box_dupe')} · 🪙 +{localizeDigits(item.refund, locale)}
+   434→   434→            </div>
+   435→   435→          )}
+   436→   436→        </>
+   437→   437→      )}
+   438→   438→
+   439→   439→      {result.levelUps > 0 && (
+   440→   440→        <div className="mt-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-black text-emerald-300">
+   441→   441→          ⬆ {t('level_up')} · {t('level')} {localizeDigits(result.user.level, locale)}
+   442→   442→        </div>
+   443→   443→      )}
+   444→   444→
+   445→   445→      <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+   446→   446→        {remaining > 0 && (
+   447→   447→          <Button className="h-11 px-5 font-black glow-gold" onClick={onAnother}>
+   448→   448→            <PackageOpen className="h-4 w-4" />
+   449→   449→            {t('box_open')}
+   450→   450→          </Button>
+   451→   451→        )}
+   452→   452→        <Button variant="outline" className="h-11 px-5 font-black" onClick={onClose}>
+   453→   453→          {t('cancel')}
+   454→   454→        </Button>
+   455→   455→      </div>
+   456→   456→    </motion.div>
+   457→   457→  );
+   458→   458→}
+   459→   459→
+   460→   460→/* ================= view ================= */
+   461→   461→
+   462→   462→export function StoreView() {
+   463→   463→  const { user, t, locale, patchUser, refreshSession } = useApp();
+   464→   464→  const uid = user?.id;
+   465→   465→  const [items, setItems] = useState<StoreItemDTO[]>([]);
+   466→   466→  const [owned, setOwned] = useState<string[]>([]);
+   467→   467→  const [me, setMe] = useState<StoreMe | null>(null);
+   468→   468→  const [loading, setLoading] = useState(true);
+   469→   469→  const [cat, setCat] = useState<StoreTab>('CHESTS');
+   470→   470→  const [confirmItem, setConfirmItem] = useState<StoreItemDTO | null>(null);
+   471→   471→  const [busyBuy, setBusyBuy] = useState<string | null>(null);
+   472→   472→
+   473→   473→  /* ---------- fortune chests (market) state ---------- */
+   474→   474→  const [boxes, setBoxes] = useState<MarketBoxDTO[]>([]);
+   475→   475→  const [inventory, setInventory] = useState<BoxGrantDTO[]>([]);
+   476→   476→  const [marketLoading, setMarketLoading] = useState(true);
+   477→   477→  const [oddsFor, setOddsFor] = useState<string | null>(null);
+   478→   478→  const [confirmBox, setConfirmBox] = useState<MarketBoxDTO | null>(null);
+   479→   479→  const [busyBox, setBusyBox] = useState(false);
+   480→   480→  const [opening, setOpening] = useState<{ grant: BoxGrantDTO; box: MarketBoxDTO } | null>(null);
+   481→   481→  const [openPhase, setOpenPhase] = useState<'shake' | 'reveal'>('shake');
+   482→   482→  const [openResult, setOpenResult] = useState<OpenResultDTO | null>(null);
+   483→   483→  const [revealSeed, setRevealSeed] = useState(0);
+   484→   484→  const [flash, setFlash] = useState(false);
+   485→   485→
+   486→   486→  /* catalog + ownership; refetches when session appears/changes */
+   487→   487→  useEffect(() => {
+   488→   488→    let live = true;
+   489→   489→    api
+   490→   490→      .get<{ items: StoreItemDTO[]; owned: string[]; me: StoreMe | null }>('/api/store')
+   491→   491→      .then((d) => {
+   492→   492→        if (!live) return;
+   493→   493→        setItems(d.items);
+   494→   494→        setOwned(d.owned);
+   495→   495→        setMe(d.me);
+   496→   496→      })
+   497→   497→      .catch(() => {
+   498→   498→        if (live) toast.error(t('error'));
+   499→   499→      })
+   500→   500→      .finally(() => {
+   501→   501→        if (live) setLoading(false);
+   502→   502→      });
+   503→   503→    return () => {
+   504→   504→      live = false;
+   505→   505→    };
+   506→   506→  }, [t, uid]);
+   507→   507→
+   508→   508→  /* ---------- market: chest catalog + my unopened grants ---------- */
+   509→   509→  const refreshMarket = useCallback(
+   510→   510→    async (silent = false) => {
+   511→   511→      try {
+   512→   512→        const d = await api.get<{ boxes: MarketBoxDTO[]; inventory: BoxGrantDTO[]; me: { coins: number; level: number } | null }>('/api/market');
+   513→   513→        setBoxes(d.boxes);
+   514→   514→        setInventory(d.inventory);
+   515→   515→        const dm = d.me;
+   516→   516→        if (dm) setMe((m) => (m ? { ...m, coins: dm.coins, level: dm.level } : m));
+   517→   517→      } catch {
+   518→   518→        if (!silent) toast.error(t('error'));
+   519→   519→      } finally {
+   520→   520→        setMarketLoading(false);
+   521→   521→      }
+   522→   522→    },
+   523→   523→    [t],
+   524→   524→  );
+   525→   525→
+   526→   526→  useEffect(() => {
+   527→   527→    void refreshMarket();
+   528→   528→  }, [refreshMarket, uid]);
+   529→   529→
+   530→   530→  const coins = me?.coins ?? user?.coins ?? 0;
+   531→   531→  const level = me?.level ?? user?.level ?? 1;
+   532→   532→  const cur = me ??
+   533→   533→    (user
+   534→   534→      ? {
+   535→   535→          pieceSkin: user.pieceSkin,
+   536→   536→          boardSkin: user.boardSkin,
+   537→   537→          background: user.background,
+   538→   538→          effectSkin: user.effectSkin,
+   539→   539→          avatarItem: user.avatarItem,
+   540→   540→          titleItem: user.titleItem,
+   541→   541→        }
+   542→   542→      : null);
+   543→   543→
+   544→   544→  const isEquipped = (item: StoreItemDTO) => (cur ? cur[EQUIP_FIELD[item.category]] === item.code : false);
+   545→   545→
+   546→   546→  const shown = items
+   547→   547→    .filter((i) => i.category === cat)
+   548→   548→    .sort((a, b) => RARITY_META[a.rarity].order - RARITY_META[b.rarity].order || a.price - b.price);
+   549→   549→
+   550→   550→  /* ---------- buy ---------- */
+   551→   551→  const doBuy = async () => {
+   552→   552→    if (!confirmItem) return;
+   553→   553→    const target = confirmItem;
+   554→   554→    setBusyBuy(target.code);
+   555→   555→    try {
+   556→   556→      const res = await api.post<{ ok: boolean; coins: number }>('/api/store', { code: target.code });
+   557→   557→      sfx.coin();
+   558→   558→      toast.success(t('purchased'));
+   559→   559→      setOwned((o) => (o.includes(target.code) ? o : [...o, target.code]));
+   560→   560→      setMe((m) => (m && typeof res.coins === 'number' ? { ...m, coins: res.coins } : m));
+   561→   561→      void refreshSession();
+   562→   562→    } catch (e) {
+   563→   563→      const code = (e as Error).message;
+   564→   564→      const need = (e as { payload?: { need?: number } }).payload?.need;
+   565→   565→      if (code === 'COINS') toast.error(t('not_enough'));
+   566→   566→      else if (code === 'LEVEL') toast.error(`${t('need_level')} ${localizeDigits(need ?? target.requiredLevel, locale)}`);
+   567→   567→      else if (code === 'OWNED') {
+   568→   568→        toast.error(t('owned'));
+   569→   569→        setOwned((o) => (o.includes(target.code) ? o : [...o, target.code]));
+   570→   570→      } else if (code === 'AUTH') toast.error(t('login'));
+   571→   571→      else toast.error(t('error'));
+   572→   572→    } finally {
+   573→   573→      setBusyBuy(null);
+   574→   574→      setConfirmItem(null);
+   575→   575→    }
+   576→   576→  };
+   577→   577→
+   578→   578→  /* ---------- chest buy (play-earned coins only) ---------- */
+   579→   579→  const doBuyBox = async () => {
+   580→   580→    if (!confirmBox) return;
+   581→   581→    const target = confirmBox;
+   582→   582→    setBusyBox(true);
+   583→   583→    try {
+   584→   584→      const res = await api.post<{ ok: boolean; coins: number }>('/api/market', { action: 'buy', boxCode: target.code });
+   585→   585→      sfx.coin();
+   586→   586→      toast.success(t('purchased'));
+   587→   587→      if (user && typeof res.coins === 'number') patchUser({ coins: res.coins });
+   588→   588→      setMe((m) => (m && typeof res.coins === 'number' ? { ...m, coins: res.coins } : m));
+   589→   589→      void refreshMarket(true);
+   590→   590→    } catch (e) {
+   591→   591→      const code = (e as Error).message;
+   592→   592→      if (code === 'COINS') toast.error(t('not_enough'));
+   593→   593→      else if (code === 'AUTH') toast.error(t('login'));
+   594→   594→      else toast.error(t('error'));
+   595→   595→    } finally {
+   596→   596→      setBusyBox(false);
+   597→   597→      setConfirmBox(null);
+   598→   598→    }
+   599→   599→  };
+   600→   600→
+   601→   601→  /* ---------- chest OPEN: suspense ≥900 ms, then reveal ---------- */
+   602→   602→  const busyOpenRef = useRef(false); // double-fire guard (survives stale closures)
+   603→   603→  const startOpen = (grant: BoxGrantDTO) => {
+   604→   604→    if (!user || busyOpenRef.current) return;
+   605→   605→    const box = boxes.find((b) => b.code === grant.boxCode);
+   606→   606→    if (!box) return;
+   607→   607→    busyOpenRef.current = true;
+   608→   608→    sfx.click();
+   609→   609→    setRevealSeed((s) => s + 1);
+   610→   610→    setOpenResult(null);
+   611→   611→    setOpenPhase('shake');
+   612→   612→    setOpening({ grant, box });
+   613→   613→    const t0 = Date.now();
+   614→   614→    void (async () => {
+   615→   615→      try {
+   616→   616→        const res = await api.post<OpenResultDTO>('/api/market', { action: 'open', grantId: grant.id });
+   617→   617→        const wait = Math.max(0, 900 - (Date.now() - t0)); // suspense always plays
+   618→   618→        window.setTimeout(() => {
+   619→   619→          busyOpenRef.current = false; // "open another" may fire again
+   620→   620→          setOpenResult(res);
+   621→   621→          setOpenPhase('reveal');
+   622→   622→          /* sync zustand session + server truth */
+   623→   623→          patchUser({ coins: res.user.coins, xp: res.user.xp, level: res.user.level });
+   624→   624→          void refreshSession();
+   625→   625→          void refreshMarket(true);
+   626→   626→          /* reveal sound design: coin for coins, fanfare for items/big rarities */
+   627→   627→          const rar = (res.item ? (res.item.rarity as Rarity) : box.rarity);
+   628→   628→          if (res.drop.kind === 'ITEM' || rar === 'LEGENDARY' || rar === 'ULTIMATE') sfx.achievement();
+   629→   629→          else sfx.coin();
+   630→   630→          if (rar === 'ULTIMATE' || box.rarity === 'ULTIMATE') {
+   631→   631→            setFlash(true);
+   632→   632→            window.setTimeout(() => setFlash(false), 280);
+   633→   633→          }
+   634→   634→          for (const a of res.unlockedAchievements) {
+   635→   635→            toast.success(`🏅 ${t('ach_unlocked')} +${localizeDigits(a.coins, locale)} 🪙`);
+   636→   636→          }
+   637→   637→          if (res.levelUps > 0) sfx.levelup();
+   638→   638→        }, wait);
+   639→   639→      } catch (e) {
+   640→   640→        const errCode = (e as Error).message;
+   641→   641→        window.setTimeout(
+   642→   642→          () => {
+   643→   643→            busyOpenRef.current = false;
+   644→   644→            if (errCode === 'AUTH') toast.error(t('login'));
+   645→   645→            else toast.error(t('error'));
+   646→   646→            setOpening(null);
+   647→   647→            void refreshMarket(true);
+   648→   648→          },
+   649→   649→          Math.max(0, 600 - (Date.now() - t0)),
+   650→   650→        );
+   651→   651→      }
+   652→   652→    })();
+   653→   653→  };
+   654→   654→
+   655→   655→  const closeOpening = () => {
+   656→   656→    /* keep the suspense unskippable while the chest shakes */
+   657→   657→    if (openPhase === 'shake') return;
+   658→   658→    busyOpenRef.current = false;
+   659→   659→    setOpening(null);
+   660→   660→    setOpenResult(null);
+   661→   661→    setOpenPhase('shake');
+   662→   662→  };
+   663→   663→
+   664→   664→  const openAnother = () => {
+   665→   665→    if (!opening) return;
+   666→   666→    const next = inventory.find((g) => g.id !== opening.grant.id);
+   667→   667→    if (!next) {
+   668→   668→      closeOpening();
+   669→   669→      return;
+   670→   670→    }
+   671→   671→    startOpen(next);
+   672→   672→  };
+   673→   673→
+   674→   674→  const remainingAfterOpen = opening ? inventory.filter((g) => g.id !== opening.grant.id).length : 0;
+   675→   675→
+   676→   676→  /* ---------- equip ---------- */
+   677→   677→  const doEquip = async (item: StoreItemDTO) => {
+   678→   678→    try {
+   679→   679→      await api.post('/api/store/equip', { code: item.code });
+   680→   680→      sfx.click();
+   681→   681→      toast.success(t('equipped_done'));
+   682→   682→      const field = EQUIP_FIELD[item.category];
+   683→   683→      if (user) patchUser(equipApply(user, field, item.code));
+   684→   684→      setMe((m) => (m ? equipApply(m, field, item.code) : m));
+   685→   685→      void refreshSession();
+   686→   686→    } catch {
+   687→   687→      toast.error(t('error'));
+   688→   688→    }
+   689→   689→  };
+   690→   690→
+   691→   691→  return (
+   692→   692→    <div className="mx-auto w-full max-w-5xl px-4 pb-10">
+   693→   693→      {/* ---------- header ---------- */}
+   694→   694→      <section className="royal-card relative mt-4 overflow-hidden rounded-3xl p-5 sm:p-6">
+   695→   695→        <div className="pointer-events-none absolute inset-0 shimmer" aria-hidden />
+   696→   696→        <div className="flex flex-wrap items-center justify-between gap-3">
+   697→   697→          <div>
+   698→   698→            <h1 className="text-2xl font-black sm:text-3xl">
+   699→   699→              🛒 <span className="gold-text">{t('store_title')}</span>
+   700→   700→            </h1>
+   701→   701→            <p className="mt-1 text-xs text-muted-foreground sm:text-sm">{t('store_sub')}</p>
+   702→   702→          </div>
+   703→   703→          <div
+   704→   704→            className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-400/10 px-3.5 py-1.5 text-sm font-black text-amber-400 glow-gold"
+   705→   705→            title={t('coins')}
+   706→   706→          >
+   707→   707→            <Coins className="h-4 w-4" />
+   708→   708→            {localizeDigits(coins, locale)}
+   709→   709→            <span className="text-[10px] font-bold opacity-75">{t('coins')}</span>
+   710→   710→          </div>
+   711→   711→        </div>
+   712→   712→        {!user && (
+   713→   713→          <p className="mt-3 text-xs text-muted-foreground">
+   714→   714→            {t('auth_no')} <b className="text-amber-400">{t('login')} →</b>
+   715→   715→          </p>
+   716→   716→        )}
+   717→   717→      </section>
+   718→   718→
+   719→   719→      {/* ---------- category tabs ---------- */}
+   720→   720→      <Tabs
+   721→   721→        value={cat}
+   722→   722→        onValueChange={(v) => {
+   723→   723→          sfx.click();
+   724→   724→          setCat(v as StoreTab);
+   725→   725→        }}
+   726→   726→        className="mt-4"
+   727→   727→      >
+   728→   728→        <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-muted/60 p-1 sm:w-fit">
+   729→   729→          <TabsTrigger value="CHESTS" className="gap-1.5 px-3 text-xs font-bold">
+   730→   730→            <Gift className="h-3.5 w-3.5 text-amber-400" />
+   731→   731→            {t('market_tab_boxes')}
+   732→   732→          </TabsTrigger>
+   733→   733→          {CATS.map((c) => (
+   734→   734→            <TabsTrigger key={c} value={c} className="px-3 text-xs font-bold">
+   735→   735→              {t(`cat_${c}` as TKey)}
+   736→   736→            </TabsTrigger>
+   737→   737→          ))}
+   738→   738→        </TabsList>
+   739→   739→      </Tabs>
+   740→   740→
+   741→   741→      {/* ---------- fortune chests (first tab) ---------- */}
+   742→   742→      {cat === 'CHESTS' && (
+   743→   743→        <section className="mt-4 space-y-6" aria-label={t('box_title')}>
+   744→   744→          {/* header row */}
+   745→   745→          <div className="flex flex-wrap items-center justify-between gap-2">
+   746→   746→            <div>
+   747→   747→              <h2 className="text-lg font-black">
+   748→   748→                🎁 <span className="gold-text">{t('box_title')}</span>
+   749→   749→              </h2>
+   750→   750→              <p className="mt-0.5 text-xs text-muted-foreground">{t('box_sub')}</p>
+   751→   751→            </div>
+   752→   752→            {!user && (
+   753→   753→              <p className="text-xs text-muted-foreground">
+   754→   754→                {t('auth_no')} <b className="text-amber-400">{t('login')} →</b>
+   755→   755→              </p>
+   756→   756→            )}
+   757→   757→          </div>
+   758→   758→
+   759→   759→          {/* chest cards — 2 cols mobile / 5 desktop */}
+   760→   760→          {marketLoading ? (
+   761→   761→            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+   762→   762→              {Array.from({ length: 5 }).map((_, i) => (
+   763→   763→                <div key={i} className="royal-card flex flex-col items-center gap-3 rounded-2xl p-4">
+   764→   764→                  <Skeleton className="h-28 w-28 rounded-2xl" />
+   765→   765→                  <Skeleton className="h-3.5 w-16" />
+   766→   766→                  <Skeleton className="h-4 w-20" />
+   767→   767→                  <Skeleton className="h-11 w-full" />
+   768→   768→                </div>
+   769→   769→              ))}
+   770→   770→            </div>
+   771→   771→          ) : boxes.length === 0 ? (
+   772→   772→            <p className="py-10 text-center text-sm text-muted-foreground">—</p>
+   773→   773→          ) : (
+   774→   774→            <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+   775→   775→              {boxes.map((b, i) => {
+   776→   776→                const meta = RARITY_META[b.rarity];
+   777→   777→                const totalW = b.drops.reduce((s, d) => s + d.weight, 0);
+   778→   778→                const afford = !!user && coins >= b.price;
+   779→   779→                return (
+   780→   780→                  <motion.div
+   781→   781→                    key={b.code}
+   782→   782→                    initial={{ opacity: 0, y: 16 }}
+   783→   783→                    animate={{ opacity: 1, y: 0 }}
+   784→   784→                    transition={{ delay: i * 0.06, duration: 0.35, ease: 'easeOut' }}
+   785→   785→                    className="royal-card card-shine relative flex flex-col items-center gap-2 rounded-2xl p-3 text-center transition-transform hover:scale-[1.02]"
+   786→   786→                    style={{ borderColor: `${meta.color}44` }}
+   787→   787→                  >
+   788→   788→                    <ChestArt image={b.image} rarity={b.rarity} size={116} />
+   789→   789→
+   790→   790→                    <Badge
+   791→   791→                      variant="outline"
+   792→   792→                      className="text-[9px] font-black"
+   793→   793→                      style={{ color: meta.color, borderColor: `${meta.color}55`, background: `${meta.color}14` }}
+   794→   794→                    >
+   795→   795→                      {t(`rarity_${b.rarity}` as TKey)}
+   796→   796→                    </Badge>
+   797→   797→
+   798→   798→                    <div className="flex w-full items-center justify-center gap-1.5">
+   799→   799→                      <span className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-400/10 px-2.5 py-1 text-xs font-black text-amber-400">
+   800→   800→                        🪙 {localizeDigits(b.price, locale)}
+   801→   801→                      </span>
+   802→   802→                      <button
+   803→   803→                        type="button"
+   804→   804→                        onClick={() => {
+   805→   805→                          sfx.click();
+   806→   806→                          setOddsFor(oddsFor === b.code ? null : b.code);
+   807→   807→                        }}
+   808→   808→                        aria-label={t('box_odds')}
+   809→   809→                        aria-expanded={oddsFor === b.code}
+   810→   810→                        className="pressable grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-white/10 bg-white/5 text-muted-foreground transition-colors hover:text-foreground"
+   811→   811→                      >
+   812→   812→                        {oddsFor === b.code ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+   813→   813→                      </button>
+   814→   814→                    </div>
+   815→   815→
+   816→   816→                    {/* odds panel (client-side weight math, sorted desc) */}
+   817→   817→                    <AnimatePresence initial={false}>
+   818→   818→                      {oddsFor === b.code && (
+   819→   819→                        <motion.div
+   820→   820→                          key="odds"
+   821→   821→                          initial={{ height: 0, opacity: 0 }}
+   822→   822→                          animate={{ height: 'auto', opacity: 1 }}
+   823→   823→                          exit={{ height: 0, opacity: 0 }}
+   824→   824→                          transition={{ duration: 0.28, ease: 'easeOut' }}
+   825→   825→                          className="w-full overflow-hidden"
+   826→   826→                        >
+   827→   827→                          <div className="w-full rounded-xl border border-white/10 bg-black/30 p-2 text-start">
+   828→   828→                            <div className="mb-1 px-1 text-[10px] font-black uppercase tracking-wide text-muted-foreground">{t('box_odds')}</div>
+   829→   829→                            <ul className="space-y-1">
+   830→   830→                              {b.drops
+   831→   831→                                .map((d) => ({ d, pct: totalW > 0 ? Math.round((d.weight / totalW) * 1000) / 10 : 0 }))
+   832→   832→                                .sort((x, y) => y.pct - x.pct)
+   833→   833→                                .map(({ d, pct }) => {
+   834→   834→                                  const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
+   835→   835→                                  const catItem = d.kind === 'ITEM' && d.itemCode ? items.find((it) => it.code === d.itemCode) : undefined;
+   836→   836→                                  return (
+   837→   837→                                    <li key={d.id} className="flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-[11px]">
+   838→   838→                                      {d.kind === 'COINS' ? (
+   839→   839→                                        <Coins className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+   840→   840→                                      ) : d.kind === 'XP' ? (
+   841→   841→                                        <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-300" />
+   842→   842→                                      ) : (
+   843→   843→                                        <Package className="h-3.5 w-3.5 shrink-0 text-emerald-300" />
+   844→   844→                                      )}
+   845→   845→                                      <span className="min-w-0 flex-1 truncate font-bold">
+   846→   846→                                        {d.kind === 'ITEM'
+   847→   847→                                          ? (catItem ? prettyName(catItem.code) : prettyName(d.itemCode ?? 'item'))
+   848→   848→                                          : `${t(d.kind === 'COINS' ? 'gift_coins' : 'gift_xp')} +${localizeDigits(d.amount, locale)}`}
+   849→   849→                                      </span>
+   850→   850→                                      {catItem && (
+   851→   851→                                        <span
+   852→   852→                                          className="h-1.5 w-1.5 shrink-0 rounded-full"
+   853→   853→                                          style={{ background: RARITY_META[catItem.rarity].color }}
+   854→   854→                                          title={t(`rarity_${catItem.rarity}` as TKey)}
+   855→   855→                                        />
+   856→   856→                                      )}
+   857→   857→                                      <span className="shrink-0 font-black" style={{ color: meta.color }}>
+   858→   858→                                        {localizeDigits(pctStr, locale)}٪
+   859→   859→                                      </span>
+   860→   860→                                    </li>
+   861→   861→                                  );
+   862→   862→                                })}
+   863→   863→                            </ul>
+   864→   864→                          </div>
+   865→   865→                        </motion.div>
+   866→   866→                      )}
+   867→   867→                    </AnimatePresence>
+   868→   868→
+   869→   869→                    {/* buy — play-earned coins only */}
+   870→   870→                    <Tooltip>
+   871→   871→                      <TooltipTrigger asChild>
+   872→   872→                        <span className="mt-auto block w-full pt-1">
+   873→   873→                          <Button
+   874→   874→                            size="sm"
+   875→   875→                            className="h-11 w-full font-black glow-gold"
+   876→   876→                            disabled={!afford}
+   877→   877→                            onClick={() => {
+   878→   878→                              sfx.click();
+   879→   879→                              setConfirmBox(b);
+   880→   880→                            }}
+   881→   881→                          >
+   882→   882→                            <Gift className="h-4 w-4" />
+   883→   883→                            {t('box_buy')}
+   884→   884→                          </Button>
+   885→   885→                        </span>
+   886→   886→                      </TooltipTrigger>
+   887→   887→                      {!user && <TooltipContent>{t('auth_no')} {t('login')} →</TooltipContent>}
+   888→   888→                      {user && !afford && <TooltipContent>{t('not_enough')}</TooltipContent>}
+   889→   889→                    </Tooltip>
+   890→   890→                  </motion.div>
+   891→   891→                );
+   892→   892→              })}
+   893→   893→            </div>
+   894→   894→          )}
+   895→   895→
+   896→   896→          {/* my chests — unopened grants strip */}
+   897→   897→          <section aria-label={t('box_inventory')}>
+   898→   898→            <h3 className="mb-2 flex items-center gap-1.5 text-sm font-black">
+   899→   899→              <PackageOpen className="h-4 w-4 text-amber-400" />
+   900→   900→              {t('box_inventory')}
+   901→   901→              {inventory.length > 0 && (
+   902→   902→                <Badge variant="outline" className="border-amber-400/40 bg-amber-400/10 text-[10px] font-black text-amber-300">
+   903→   903→                  {localizeDigits(inventory.length, locale)}
+   904→   904→                </Badge>
+   905→   905→              )}
+   906→   906→            </h3>
+   907→   907→            {inventory.length === 0 ? (
+   908→   908→              <p className="rounded-2xl border border-dashed border-white/10 p-5 text-center text-xs text-muted-foreground">{t('box_empty')}</p>
+   909→   909→            ) : (
+   910→   910→              <div className="nice-scroll flex gap-2 overflow-x-auto pb-2">
+   911→   911→                {inventory.map((g) => {
+   912→   912→                  const gb = boxes.find((x) => x.code === g.boxCode);
+   913→   913→                  const gMeta = RARITY_META[gb?.rarity ?? 'COMMON'];
+   914→   914→                  const gift = g.source === 'GIFT' || g.source === 'ADMIN';
+   915→   915→                  return (
+   916→   916→                    <div key={g.id} className="royal-card flex shrink-0 items-center gap-2 rounded-2xl p-2 pe-3" style={{ borderColor: `${gMeta.color}44` }}>
+   917→   917→                      <div className="relative">
+   918→   918→                        <ChestArt image={gb?.image ?? ''} rarity={gb?.rarity ?? 'COMMON'} size={52} />
+   919→   919→                        {gift && (
+   920→   920→                          <span className="absolute -end-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-amber-400 text-[10px] shadow" title={g.source} aria-hidden>
+   921→   921→                            🎁
+   922→   922→                          </span>
+   923→   923→                        )}
+   924→   924→                      </div>
+   925→   925→                      <div className="flex min-w-0 flex-col items-start gap-1">
+   926→   926→                        <span className="text-[10px] font-black" style={{ color: gMeta.color }}>
+   927→   927→                          {t(`rarity_${gb?.rarity ?? 'COMMON'}` as TKey)}
+   928→   928→                        </span>
+   929→   929→                        <Button size="sm" className="h-11 px-4 font-black glow-gold" disabled={!gb} onClick={() => gb && startOpen(g)}>
+   930→   930→                          <PackageOpen className="h-4 w-4" />
+   931→   931→                          {t('box_open')}
+   932→   932→                        </Button>
+   933→   933→                      </div>
+   934→   934→                    </div>
+   935→   935→                  );
+   936→   936→                })}
+   937→   937→              </div>
+   938→   938→            )}
+   939→   939→          </section>
+   940→   940→
+   941→   941→          {/* brand law: chests are bought ONLY with play-earned coins — no real money, ever */}
+   942→   942→          <p className="flex items-start gap-1.5 text-[11px] leading-5 text-muted-foreground">
+   943→   943→            <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden />
+   944→   944→            <span>
+   945→   945→              <span dir="rtl" className="block">
+   946→   946→                سکه‌ها فقط از راه بازی، دستاورد و رویدادها به‌دست می‌آیند — خرید واقعی وجود ندارد.
+   947→   947→              </span>
+   948→   948→              <span dir="ltr" className="block text-start">
+   949→   949→                Coins come only from playing, achievements and events — no real-money purchases.
+   950→   950→              </span>
+   951→   951→            </span>
+   952→   952→          </p>
+   953→   953→        </section>
+   954→   954→      )}
+   955→   955→
+   956→   956→      {/* ---------- item grid ---------- */}
+   957→   957→      {cat !== 'CHESTS' && (
+   958→   958→      <div className="nice-scroll mt-4 max-h-[70dvh] overflow-y-auto pb-2 pe-1">
+   959→   959→        {loading ? (
+   960→   960→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   961→   961→            {Array.from({ length: 8 }).map((_, i) => (
+   962→   962→              <div key={i} className="royal-card flex flex-col items-center gap-3 rounded-2xl p-4">
+   963→   963→                <Skeleton className="h-16 w-16 rounded-lg" />
+   964→   964→                <Skeleton className="h-3.5 w-20" />
+   965→   965→                <Skeleton className="h-4 w-14" />
+   966→   966→                <Skeleton className="h-8 w-full" />
+   967→   967→              </div>
+   968→   968→            ))}
+   969→   969→          </div>
+   970→   970→        ) : shown.length === 0 ? (
+   971→   971→          <p className="py-16 text-center text-sm text-muted-foreground">—</p>
+   972→   972→        ) : (
+   973→   973→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+   974→   974→            {shown.map((item) => {
+   975→   975→              const meta = RARITY_META[item.rarity];
+   976→   976→              const glow = item.rarity === 'EPIC' || item.rarity === 'LEGENDARY';
+   977→   977→              const isOwned = owned.includes(item.code);
+   978→   978→              const equipped = isEquipped(item);
+   979→   979→              const canAfford = coins >= item.price;
+   980→   980→              const levelOk = level >= item.requiredLevel;
+   981→   981→              return (
+   982→   982→                <div
+   983→   983→                  key={item.code}
+   984→   984→                  className="royal-card card-shine group relative flex flex-col items-center gap-2 rounded-2xl p-3 pt-4 text-center transition-all hover:scale-[1.02]"
+   985→   985→                  style={{ borderColor: `${meta.color}3a` }}
+   986→   986→                >
+   987→   987→                  {isOwned && (
+   988→   988→                    <Badge variant="outline" className="absolute end-2 top-2 border-emerald-500/40 bg-emerald-500/10 text-[9px] font-black text-emerald-300">
+   989→   989→                      {t('owned')}
+   990→   990→                    </Badge>
+   991→   991→                  )}
+   992→   992→                  {equipped && (
+   993→   993→                    <Badge variant="outline" className="absolute start-2 top-2 border-amber-400/50 bg-amber-400/15 text-[9px] font-black text-amber-300">
+   994→   994→                      {t('equipped')}
+   995→   995→                    </Badge>
+   996→   996→                  )}
+   997→   997→
+   998→   998→                  <div className="transition-transform group-hover:scale-105">
+   999→   999→                    <ItemPreview item={item} glow={glow} />
+  1000→  1000→                  </div>
+  1001→  1001→
+  1002→  1002→                  <div className="max-w-full truncate text-sm font-black">{prettyName(item.code)}</div>
+  1003→  1003→
+  1004→  1004→                  <Badge
+  1005→  1005→                    variant="outline"
+  1006→  1006→                    className="text-[9px] font-black"
+  1007→  1007→                    style={{ color: meta.color, borderColor: `${meta.color}55`, background: `${meta.color}14` }}
+  1008→  1008→                  >
+  1009→  1009→                    {t(`rarity_${item.rarity}` as TKey)}
+  1010→  1010→                  </Badge>
+  1011→  1011→
+  1012→  1012→                  <div className="text-xs font-black">
+  1013→  1013→                    {item.price === 0 ? (
+  1014→  1014→                      <span className="text-emerald-400">FREE</span>
+  1015→  1015→                    ) : (
+  1016→  1016→                      <span className="text-amber-400">🪙 {localizeDigits(item.price, locale)}</span>
+  1017→  1017→                    )}
+  1018→  1018→                  </div>
+  1019→  1019→
+  1020→  1020→                  <div className="mt-auto w-full pt-1">
+  1021→  1021→                    {isOwned ? (
+  1022→  1022→                      equipped ? (
+  1023→  1023→                        <Button
+  1024→  1024→                          size="sm"
+  1025→  1025→                          variant="outline"
+  1026→  1026→                          disabled
+  1027→  1027→                          className="w-full border-amber-400/50 bg-amber-400/10 font-black text-amber-300"
+  1028→  1028→                        >
+  1029→  1029→                          ✓ {t('equipped')}
+  1030→  1030→                        </Button>
+  1031→  1031→                      ) : (
+  1032→  1032→                        <Button size="sm" className="w-full font-black" onClick={() => void doEquip(item)}>
+  1033→  1033→                          {t('equip')}
+  1034→  1034→                        </Button>
+  1035→  1035→                      )
+  1036→  1036→                    ) : !levelOk ? (
+  1037→  1037→                      <Tooltip>
+  1038→  1038→                        <TooltipTrigger asChild>
+  1039→  1039→                          <span className="block w-full cursor-not-allowed">
+  1040→  1040→                            <Button size="sm" variant="secondary" disabled className="w-full">
+  1041→  1041→                              🔒 {t('locked')}
+  1042→  1042→                            </Button>
+  1043→  1043→                          </span>
+  1044→  1044→                        </TooltipTrigger>
+  1045→  1045→                        <TooltipContent>
+  1046→  1046→                          {t('need_level')} {localizeDigits(item.requiredLevel, locale)}
+  1047→  1047→                        </TooltipContent>
+  1048→  1048→                      </Tooltip>
+  1049→  1049→                    ) : (
+  1050→  1050→                      <Tooltip>
+  1051→  1051→                        <TooltipTrigger asChild>
+  1052→  1052→                          <span className="block w-full">
+  1053→  1053→                            <Button
+  1054→  1054→                              size="sm"
+  1055→  1055→                              className="w-full glow-gold font-black"
+  1056→  1056→                              disabled={!canAfford || busyBuy === item.code}
+  1057→  1057→                              onClick={() => setConfirmItem(item)}
+  1058→  1058→                            >
+  1059→  1059→                              {busyBuy === item.code ? '…' : t('buy')}
+  1060→  1060→                            </Button>
+  1061→  1061→                          </span>
+  1062→  1062→                        </TooltipTrigger>
+  1063→  1063→                        {!canAfford && <TooltipContent>{t('not_enough')}</TooltipContent>}
+  1064→  1064→                      </Tooltip>
+  1065→  1065→                    )}
+  1066→  1066→                  </div>
+  1067→  1067→                </div>
+  1068→  1068→              );
+  1069→  1069→            })}
+  1070→  1070→          </div>
+  1071→  1071→        )}
+  1072→  1072→      </div>
+  1073→  1073→      )}
+  1074→  1074→
+  1075→  1075→      {/* ---------- chest buy confirm ---------- */}
+  1076→  1076→      <AlertDialog open={!!confirmBox} onOpenChange={(o) => !o && setConfirmBox(null)}>
+  1077→  1077→        <AlertDialogContent className="royal-card">
+  1078→  1078→          <AlertDialogHeader>
+  1079→  1079→            <AlertDialogTitle className="gold-text">{t('box_buy')}</AlertDialogTitle>
+  1080→  1080→            <AlertDialogDescription asChild>
+  1081→  1081→              <div>
+  1082→  1082→                {confirmBox && (
+  1083→  1083→                  <span className="flex flex-wrap items-center gap-2">
+  1084→  1084→                    <b className="text-foreground">
+  1085→  1085→                      {t('gift_box')} · {t(`rarity_${confirmBox.rarity}` as TKey)}
+  1086→  1086→                    </b>
+  1087→  1087→                    <span className="font-bold text-amber-400">🪙 {localizeDigits(confirmBox.price, locale)}</span>
+  1088→  1088→                    <span>
+  1089→  1089→                      {t('coins')}: {localizeDigits(coins, locale)}
+  1090→  1090→                    </span>
+  1091→  1091→                  </span>
+  1092→  1092→                )}
+  1093→  1093→              </div>
+  1094→  1094→            </AlertDialogDescription>
+  1095→  1095→          </AlertDialogHeader>
+  1096→  1096→          <AlertDialogFooter>
+  1097→  1097→            <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+  1098→  1098→            <AlertDialogAction className="glow-gold" disabled={busyBox} onClick={() => void doBuyBox()}>
+  1099→  1099→              {busyBox ? '…' : t('confirm')}
+  1100→  1100→            </AlertDialogAction>
+  1101→  1101→          </AlertDialogFooter>
+  1102→  1102→        </AlertDialogContent>
+  1103→  1103→      </AlertDialog>
+  1104→  1104→
+  1105→  1105→      {/* ---------- chest opening experience (suspense → reveal) ---------- */}
+  1106→  1106→      <Dialog
+  1107→  1107→        open={!!opening}
+  1108→  1108→        onOpenChange={(o) => {
+  1109→  1109→          if (!o) closeOpening();
+  1110→  1110→        }}
+  1111→  1111→      >
+  1112→  1112→        <DialogContent
+  1113→  1113→          showCloseButton={false}
+  1114→  1114→          className="w-[calc(100%-2rem)] max-w-md overflow-hidden rounded-3xl border border-white/10 bg-[#07070f]/95 p-6 text-center shadow-2xl backdrop-blur-xl"
+  1115→  1115→        >
+  1116→  1116→          {opening && (
+  1117→  1117→            <>
+  1118→  1118→              <DialogTitle className="sr-only">
+  1119→  1119→                {t('box_title')} — {t(`rarity_${opening.box.rarity}` as TKey)}
+  1120→  1120→              </DialogTitle>
+  1121→  1121→              <DialogDescription className="sr-only">{t('box_opening_anim')}</DialogDescription>
+  1122→  1122→
+  1123→  1123→              <div className="relative flex min-h-[320px] flex-col items-center justify-center">
+  1124→  1124→                <AnimatePresence mode="wait" initial={false}>
+  1125→  1125→                  {openPhase === 'shake' ? (
+  1126→  1126→                    <motion.div key="shake" className="flex flex-col items-center" exit={{ opacity: 0, scale: 1.15 }} transition={{ duration: 0.18 }}>
+  1127→  1127→                      {/* escalating wiggle while the server rolls */}
+  1128→  1128→                      <motion.div
+  1129→  1129→                        animate={{ rotate: [0, -3, 3, -6, 6, -9, 9, -12, 12, 0], scale: [1, 1.03, 1, 1.05, 1, 1.07, 1] }}
+  1130→  1130→                        transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
+  1131→  1131→                      >
+  1132→  1132→                        <ChestArt image={opening.box.image} rarity={opening.box.rarity} size={190} />
+  1133→  1133→                      </motion.div>
+  1134→  1134→                      <motion.p
+  1135→  1135→                        className="mt-6 text-sm font-black text-amber-300"
+  1136→  1136→                        animate={{ opacity: [0.45, 1, 0.45] }}
+  1137→  1137→                        transition={{ duration: 1.1, repeat: Infinity }}
+  1138→  1138→                      >
+  1139→  1139→                        {t('box_opening_anim')}
+  1140→  1140→                      </motion.p>
+  1141→  1141→                    </motion.div>
+  1142→  1142→                  ) : openResult ? (
+  1143→  1143→                    <RevealContent
+  1144→  1144→                      key={`reveal-${revealSeed}`}
+  1145→  1145→                      result={openResult}
+  1146→  1146→                      box={opening.box}
+  1147→  1147→                      catalog={items}
+  1148→  1148→                      remaining={remainingAfterOpen}
+  1149→  1149→                      seed={revealSeed}
+  1150→  1150→                      t={t}
+  1151→  1151→                      locale={locale}
+  1152→  1152→                      onAnother={openAnother}
+  1153→  1153→                      onClose={closeOpening}
+  1154→  1154→                    />
+  1155→  1155→                  ) : null}
+  1156→  1156→                </AnimatePresence>
+  1157→  1157→              </div>
+  1158→  1158→            </>
+  1159→  1159→          )}
+  1160→  1160→        </DialogContent>
+  1161→  1161→      </Dialog>
+  1162→  1162→
+  1163→  1163→      {/* ULTIMATE screen flash */}
+  1164→  1164→      {flash && (
+  1165→  1165→        <motion.div
+  1166→  1166→          className="pointer-events-none fixed inset-0 z-[70] bg-white"
+  1167→  1167→          initial={{ opacity: 0.9 }}
+  1168→  1168→          animate={{ opacity: 0 }}
+  1169→  1169→          transition={{ duration: 0.26, ease: 'easeOut' }}
+  1170→  1170→          aria-hidden
+  1171→  1171→        />
+  1172→  1172→      )}
+  1173→  1173→
+  1174→  1174→      {/* ---------- buy confirm dialog ---------- */}
+  1175→  1175→      <AlertDialog open={!!confirmItem} onOpenChange={(o) => !o && setConfirmItem(null)}>
+  1176→  1176→        <AlertDialogContent className="royal-card">
+  1177→  1177→          <AlertDialogHeader>
+  1178→  1178→            <AlertDialogTitle className="gold-text">{t('buy_confirm')}</AlertDialogTitle>
+  1179→  1179→            <AlertDialogDescription asChild>
+  1180→  1180→              <div>
+  1181→  1181→                {confirmItem && (
+  1182→  1182→                  <span className="flex flex-wrap items-center gap-2">
+  1183→  1183→                    <b className="text-foreground">{prettyName(confirmItem.code)}</b>
+  1184→  1184→                    <span className="font-bold text-amber-400">🪙 {localizeDigits(confirmItem.price, locale)}</span>
+  1185→  1185→                    <span>
+  1186→  1186→                      {t('coins')}: {localizeDigits(coins, locale)}
+  1187→  1187→                    </span>
+  1188→  1188→                  </span>
+  1189→  1189→                )}
+  1190→  1190→              </div>
+  1191→  1191→            </AlertDialogDescription>
+  1192→  1192→          </AlertDialogHeader>
+  1193→  1193→          <AlertDialogFooter>
+  1194→  1194→            <AlertDialogCancel>{t('cancel')}</AlertDialogCancel>
+  1195→  1195→            <AlertDialogAction className="glow-gold" onClick={() => void doBuy()}>
+  1196→  1196→              {t('confirm')}
+  1197→  1197→            </AlertDialogAction>
+  1198→  1198→          </AlertDialogFooter>
+  1199→  1199→        </AlertDialogContent>
+  1200→  1200→      </AlertDialog>
+  1201→  1201→    </div>
+  1202→  1202→  );
+  1203→  1203→}
+  1204→  1204→
